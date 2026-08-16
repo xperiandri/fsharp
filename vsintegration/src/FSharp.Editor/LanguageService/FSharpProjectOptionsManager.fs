@@ -332,13 +332,6 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker) =
                         cts.Cancel()
                         cts.Dispose()
 
-                let disposeDebounceCts () =
-                    match Interlocked.Exchange(&debounceCts, null) with
-                    | null -> ()
-                    | cts ->
-                        cts.Cancel()
-                        cts.Dispose()
-
                 let updateProjectOptions () =
                     let cts = new CancellationTokenSource()
                     let debounceToken = cts.Token
