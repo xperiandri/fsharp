@@ -220,7 +220,7 @@ module private CheckerExtensions =
 
             {
                 Path = path
-                LastModified = System.IO.File.GetLastWriteTimeUtc path
+                LastModified = ReferenceStampCache.GetLastWriteTimeUtc path
             })
         |> Seq.toList
 

@@ -156,41 +156,6 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
     let cache =
         ConcurrentDictionary<ProjectId, Project * FSharpParsingOptions * FSharpProjectOptions>()
 
-    // Push invalidation for on-disk '-r:' reference assemblies (not tracked by the Roslyn
-    // workspace): when one changes after an external rebuild, drop the cached options of every
-    // project referencing it instead of waiting for a timestamp poll to notice.
-    let referenceWatches = ConcurrentDictionary<ProjectId, string[]>()
-
-    let onWatchedReferenceChanged (path: string) =
-        for KeyValue(projectId, paths) in referenceWatches do
-            if paths |> Array.exists (fun p -> String.Equals(p, path, StringComparison.OrdinalIgnoreCase)) then
-                match cache.TryRemove projectId with
-                | true, (_, _, projectOptions) -> checker.InvalidateConfiguration(projectOptions, userOpName = "onWatchedReferenceChanged")
-                | _ -> ()
-
-    let referenceChangeTracker =
-        fileChangeWatcher
-        |> Option.map (fun watcher -> new FSharpReferenceChangeTracker(watcher, onWatchedReferenceChanged))
-
-    let clearReferenceWatches (projectId: ProjectId) =
-        match referenceWatches.TryRemove projectId, referenceChangeTracker with
-        | (true, paths), Some tracker -> paths |> Array.iter (fun p -> tracker.StopWatchingReference p)
-        | _ -> ()
-
-    let watchReferenceFiles (projectId: ProjectId) (projectOptions: FSharpProjectOptions) =
-        referenceChangeTracker
-        |> Option.iter (fun tracker ->
-            clearReferenceWatches projectId
-
-            let paths =
-                projectOptions.OtherOptions
-                |> Array.filter (fun x -> x.StartsWith("-r:", StringComparison.Ordinal))
-                |> Array.map (fun x -> x.Substring "-r:".Length)
-
-            if paths.Length > 0 then
-                paths |> Array.iter (fun p -> tracker.StartWatchingReference p)
-                referenceWatches[projectId] <- paths)
-
     let singleFileCache = ConcurrentDictionary<DocumentId, SingleFileCacheEntry>()
 
     let emitCache = ConcurrentDictionary<ProjectId, PEReferenceCacheEntry>()
@@ -201,6 +166,79 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
 
     let disposeSingleFileCacheEntry ({ Subscription = subscription }: SingleFileCacheEntry) =
         subscription |> ValueOption.iter (fun subscription -> subscription.Dispose())
+
+    // Push invalidation for on-disk '-r:' reference assemblies (not tracked by the Roslyn
+    // workspace): when one changes after an external rebuild, drop the cached options of every
+    // project and script referencing it instead of waiting for a timestamp poll to notice.
+    let referenceWatches = ConcurrentDictionary<ProjectId, string[]>()
+    let scriptReferenceWatches = ConcurrentDictionary<DocumentId, string[]>()
+
+    let referencePaths (projectOptions: FSharpProjectOptions) =
+        projectOptions.OtherOptions
+        |> Array.filter (fun x -> x.StartsWith("-r:", StringComparison.Ordinal))
+        |> Array.map (fun x -> x.Substring "-r:".Length)
+
+    let onWatchedReferenceChanged (path: string) =
+        ReferenceStampCache.Invalidate path
+
+        let isWatched paths =
+            paths
+            |> Array.exists (fun p -> String.Equals(p, path, StringComparison.OrdinalIgnoreCase))
+
+        for KeyValue(projectId, paths) in referenceWatches do
+            if isWatched paths then
+                match cache.TryRemove projectId with
+                | true, (_, _, projectOptions) -> checker.InvalidateConfiguration(projectOptions, userOpName = "onWatchedReferenceChanged")
+                | _ -> ()
+
+        for KeyValue(documentId, paths) in scriptReferenceWatches do
+            if isWatched paths then
+                match singleFileCache.TryRemove documentId with
+                | true, ({ ProjectOptions = projectOptions } as entry) ->
+                    disposeSingleFileCacheEntry entry
+                    checker.ClearCache([ projectOptions ])
+                | _ -> ()
+
+    let referenceChangeTracker =
+        fileChangeWatcher
+        |> Option.map (fun watcher ->
+            ReferenceStampCache.Enable()
+            new FSharpReferenceChangeTracker(watcher, onWatchedReferenceChanged))
+
+    let stopWatching (tracker: FSharpReferenceChangeTracker) paths =
+        paths |> Array.iter (fun p -> tracker.StopWatchingReference p)
+
+    let clearReferenceWatches (projectId: ProjectId) =
+        match referenceWatches.TryRemove projectId, referenceChangeTracker with
+        | (true, paths), Some tracker -> stopWatching tracker paths
+        | _ -> ()
+
+    let clearScriptReferenceWatches (documentId: DocumentId) =
+        match scriptReferenceWatches.TryRemove documentId, referenceChangeTracker with
+        | (true, paths), Some tracker -> stopWatching tracker paths
+        | _ -> ()
+
+    let watchReferenceFiles (projectId: ProjectId) (projectOptions: FSharpProjectOptions) =
+        referenceChangeTracker
+        |> Option.iter (fun tracker ->
+            clearReferenceWatches projectId
+
+            let paths = referencePaths projectOptions
+
+            if paths.Length > 0 then
+                paths |> Array.iter (fun p -> tracker.StartWatchingReference p)
+                referenceWatches[projectId] <- paths)
+
+    let watchScriptReferences (documentId: DocumentId) (projectOptions: FSharpProjectOptions) =
+        referenceChangeTracker
+        |> Option.iter (fun tracker ->
+            clearScriptReferenceWatches documentId
+
+            let paths = referencePaths projectOptions
+
+            if paths.Length > 0 then
+                paths |> Array.iter (fun p -> tracker.StartWatchingReference p)
+                scriptReferenceWatches[documentId] <- paths)
 
     let tryGetCachedPEReference projectId stamp comp =
         match emitCache.TryGetValue(projectId) with
@@ -443,6 +481,8 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
                     (fun _ existing -> addToCacheAndSubscribe existing)
                 )
                 |> ignore
+
+                watchScriptReferences document.Id projectOptions
 
                 return ValueSome(parsingOptions, projectOptions)
 
@@ -688,6 +728,8 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
                         disposeSingleFileCacheEntry cacheEntry
                     | _ -> ()
 
+                    clearScriptReferenceWatches documentId
+
         }
 
     let agent =
@@ -727,6 +769,9 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
 
         for projectId in referenceWatches.Keys |> Array.ofSeq do
             clearReferenceWatches projectId
+
+        for documentId in scriptReferenceWatches.Keys |> Array.ofSeq do
+            clearScriptReferenceWatches documentId
 
     member _.ScriptUpdated = scriptUpdatedEvent.Publish
 

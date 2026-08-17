@@ -60,6 +60,24 @@ type internal IFSharpFileChangeContext =
 type internal IFSharpFileChangeWatcher =
     abstract CreateContext: watchedDirectories: WatchedDirectory list -> IFSharpFileChangeContext
 
+/// Process-wide cache of on-disk reference timestamps. Enabled when push-based file watching
+/// is active: watched paths are invalidated point-wise by change notifications, so repeated
+/// snapshot creation reads a dictionary instead of stat'ing every '-r:' reference again.
+module internal ReferenceStampCache =
+    let private stamps = ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase)
+
+    let mutable private enabled = false
+
+    let Enable () = enabled <- true
+
+    let Invalidate (path: string) = stamps.TryRemove path |> ignore
+
+    let GetLastWriteTimeUtc (path: string) =
+        if enabled then
+            stamps.GetOrAdd(path, (fun p -> IO.File.GetLastWriteTimeUtc p))
+        else
+            IO.File.GetLastWriteTimeUtc path
+
 [<AutoOpen>]
 module private FileChangeWatcherImpl =
 
