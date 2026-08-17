@@ -234,7 +234,10 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
         |> Option.iter (fun tracker ->
             clearScriptReferenceWatches documentId
 
-            let paths = referencePaths projectOptions
+            // Scripts also pull in #load sources that are not Roslyn documents.
+            let paths =
+                Array.append (referencePaths projectOptions) projectOptions.SourceFiles
+                |> Array.distinct
 
             if paths.Length > 0 then
                 paths |> Array.iter (fun p -> tracker.StartWatchingReference p)
