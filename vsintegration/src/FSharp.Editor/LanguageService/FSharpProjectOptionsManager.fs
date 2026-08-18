@@ -25,7 +25,7 @@ open CancellableTasks
 [<AutoOpen>]
 module private FSharpProjectOptionsHelpers =
 
-    let mapCpsProjectToSite (project: Project, cpsCommandLineOptions: IDictionary<ProjectId, string[] * string[]>) =
+    let mapCpsProjectToSite (project: Project, cpsCommandLineOptions: IDictionary<ProjectId, struct (string[] * string[])>) =
         let sourcePaths, referencePaths, options =
             match cpsCommandLineOptions.TryGetValue(project.Id) with
             | true, (sourcePaths, options) -> sourcePaths, [||], options
@@ -137,24 +137,24 @@ type PEReferenceCacheEntry =
 type private FSharpProjectOptionsMessage =
     | TryGetOptionsByDocument of
         Document *
-        AsyncReplyChannel<(FSharpParsingOptions * FSharpProjectOptions) voption> *
+        AsyncReplyChannel<struct (FSharpParsingOptions * FSharpProjectOptions) voption> *
         CancellationToken *
         userOpName: string
-    | TryGetOptionsByProject of Project * AsyncReplyChannel<(FSharpParsingOptions * FSharpProjectOptions) voption> * CancellationToken
+    | TryGetOptionsByProject of Project * AsyncReplyChannel<struct (FSharpParsingOptions * FSharpProjectOptions) voption> * CancellationToken
     | ClearOptions of ProjectId
     | ClearSingleFileOptionsCache of DocumentId
 
 [<Sealed>]
-type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatcher: IFSharpFileChangeWatcher option) =
+type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatcher: IFSharpFileChangeWatcher) =
     let cancellationTokenSource = new CancellationTokenSource()
 
     // Store command line options
-    let commandLineOptions = ConcurrentDictionary<ProjectId, string[] * string[]>()
+    let commandLineOptions = ConcurrentDictionary<ProjectId, struct (string[] * string[])>()
 
     let legacyProjectSites = ConcurrentDictionary<ProjectId, IProjectSite>()
 
     let cache =
-        ConcurrentDictionary<ProjectId, Project * FSharpParsingOptions * FSharpProjectOptions>()
+        ConcurrentDictionary<ProjectId, struct (Project * FSharpParsingOptions * FSharpProjectOptions)>()
 
     let singleFileCache = ConcurrentDictionary<DocumentId, SingleFileCacheEntry>()
 
@@ -188,7 +188,7 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
         for KeyValue(projectId, paths) in referenceWatches do
             if isWatched paths then
                 match cache.TryRemove projectId with
-                | true, (_, _, projectOptions) -> checker.InvalidateConfiguration(projectOptions, userOpName = "onWatchedReferenceChanged")
+                | true, struct (_, _, projectOptions) -> checker.InvalidateConfiguration(projectOptions, userOpName = "onWatchedReferenceChanged")
                 | _ -> ()
 
         for KeyValue(documentId, paths) in scriptReferenceWatches do
@@ -199,49 +199,47 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
                     checker.ClearCache([ projectOptions ])
                 | _ -> ()
 
-    let referenceChangeTracker =
-        fileChangeWatcher
-        |> Option.map (fun watcher ->
-            ReferenceStampCache.Enable()
-            new FSharpReferenceChangeTracker(watcher, onWatchedReferenceChanged))
+    do ReferenceStampCache.Enable()
 
-    let stopWatching (tracker: FSharpReferenceChangeTracker) paths =
-        paths |> Array.iter (fun p -> tracker.StopWatchingReference p)
+    let referenceChangeTracker =
+        new FSharpReferenceChangeTracker(fileChangeWatcher, onWatchedReferenceChanged)
+
+    let stopWatching paths =
+        paths |> Array.iter (fun p -> referenceChangeTracker.StopWatchingReference p)
 
     let clearReferenceWatches (projectId: ProjectId) =
-        match referenceWatches.TryRemove projectId, referenceChangeTracker with
-        | (true, paths), Some tracker -> stopWatching tracker paths
+        match referenceWatches.TryRemove projectId with
+        | true, paths -> stopWatching paths
         | _ -> ()
 
     let clearScriptReferenceWatches (documentId: DocumentId) =
-        match scriptReferenceWatches.TryRemove documentId, referenceChangeTracker with
-        | (true, paths), Some tracker -> stopWatching tracker paths
+        match scriptReferenceWatches.TryRemove documentId with
+        | true, paths -> stopWatching paths
         | _ -> ()
 
     let watchReferenceFiles (projectId: ProjectId) (projectOptions: FSharpProjectOptions) =
-        referenceChangeTracker
-        |> Option.iter (fun tracker ->
-            clearReferenceWatches projectId
+        clearReferenceWatches projectId
 
-            let paths = referencePaths projectOptions
+        let paths = referencePaths projectOptions
 
-            if paths.Length > 0 then
-                paths |> Array.iter (fun p -> tracker.StartWatchingReference p)
-                referenceWatches[projectId] <- paths)
+        if paths.Length > 0 then
+            paths |> Array.iter (fun p -> referenceChangeTracker.StartWatchingReference p)
+            referenceWatches[projectId] <- paths
 
     let watchScriptReferences (documentId: DocumentId) (projectOptions: FSharpProjectOptions) =
-        referenceChangeTracker
-        |> Option.iter (fun tracker ->
-            clearScriptReferenceWatches documentId
+        clearScriptReferenceWatches documentId
 
-            // Scripts also pull in #load sources that are not Roslyn documents.
-            let paths =
-                Array.append (referencePaths projectOptions) projectOptions.SourceFiles
-                |> Array.distinct
+        let paths =
+            seq {
+                yield! referencePaths projectOptions
+                yield! projectOptions.SourceFiles
+            }
+            |> Seq.distinct
+            |> Seq.toArray
 
-            if paths.Length > 0 then
-                paths |> Array.iter (fun p -> tracker.StartWatchingReference p)
-                scriptReferenceWatches[documentId] <- paths)
+        if paths.Length > 0 then
+            paths |> Array.iter (fun p -> referenceChangeTracker.StartWatchingReference p)
+            scriptReferenceWatches[documentId] <- paths
 
     let tryGetCachedPEReference projectId stamp comp =
         match emitCache.TryGetValue(projectId) with
@@ -283,32 +281,32 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
                             strongComp <- Unchecked.defaultof<_>
                             lastSuccessfulCompilations.[projectId] <- comp
                             ms.Position <- 0L
-                            ms :> Stream |> Some
+                            ms :> Stream |> ValueSome
                         else
                             strongComp <- Unchecked.defaultof<_>
                             ms.Dispose()
-                            None
+                            ValueNone
                     with
                     | :? OperationCanceledException ->
                         stampTime <- DateTime.UtcNow
                         ms.Dispose()
-                        None
+                        ValueNone
                     | _ ->
                         strongComp <- Unchecked.defaultof<_>
                         ms.Dispose()
-                        None
+                        ValueNone
 
                 let resultOpt =
                     match weakComp.TryGetTarget() with
                     | true, comp -> tryStream comp
-                    | _ -> None
+                    | _ -> ValueNone
 
                 match resultOpt with
-                | Some _ -> resultOpt
+                | ValueSome _ -> resultOpt
                 | _ ->
                     match lastSuccessfulCompilations.TryGetValue(projectId) with
                     | true, comp -> tryStream comp
-                    | _ -> None
+                    | _ -> ValueNone
 
         let getStampTime () = stampTime
         FSharpReferencedProject.PEReference(getStampTime, DelayedILModuleReader(referencedProject.OutputFilePath, getStream))
@@ -447,18 +445,14 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
                     let textViewSubscription =
                         textViewAndCaret ()
                         |> ValueOption.bind (fun (textView, _) ->
-                            subscribeToTextViewEvents (
-                                textView,
-                                (ValueSome onChangeCaretHandler),
-                                (ValueSome onKillFocus),
-                                (ValueSome onSetFocus)
-                            ))
+                            subscribeToTextViewEvents (textView, (ValueSome onChangeCaretHandler), (ValueSome onKillFocus), (ValueSome onSetFocus))
+                        )
 
                     let subscription =
                         ValueSome
                             { new IDisposable with
                                 member _.Dispose() =
-                                    textViewSubscription |> ValueOption.iter _.Dispose()
+                                    textViewSubscription |> ValueOption.iter (fun subscription -> subscription.Dispose())
                                     disposeDebounceCts ()
                             }
 
@@ -487,7 +481,7 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
 
                 watchScriptReferences document.Id projectOptions
 
-                return ValueSome(parsingOptions, projectOptions)
+                return ValueSome struct (parsingOptions, projectOptions)
 
             | true,
               {
@@ -510,7 +504,7 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
 
                     return! tryComputeOptionsBySingleScriptOrFile document userOpName
                 else
-                    return ValueSome(parsingOptions, projectOptions)
+                    return ValueSome struct (parsingOptions, projectOptions)
         }
 
     let tryGetProjectSite (project: Project) =
@@ -544,7 +538,7 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
                         if referencedProject.Language = FSharpConstants.FSharpLanguageName then
                             match! tryComputeOptions referencedProject with
                             | ValueNone -> canBail <- true
-                            | ValueSome(_, projectOptions) ->
+                            | ValueSome struct (_, projectOptions) ->
                                 referencedProjects.Add(
                                     FSharpReferencedProject.FSharpReference(referencedProject.OutputFilePath, projectOptions)
                                 )
@@ -615,7 +609,7 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
                                 let options =
                                     projectsToClearCache
                                     |> Seq.map (fun pair ->
-                                        let _, _, projectOptions = pair.Value
+                                        let struct (_, _, projectOptions) = pair.Value
                                         projectOptions)
 
                                 checker.ClearCache(options, userOpName = "tryComputeOptions")
@@ -629,20 +623,20 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
 
                             let parsingOptions, _ = checker.GetParsingOptionsFromProjectOptions(projectOptions)
 
-                            cache.[projectId] <- (project, parsingOptions, projectOptions)
+                            cache.[projectId] <- struct (project, parsingOptions, projectOptions)
 
                             watchReferenceFiles projectId projectOptions
 
-                            return ValueSome(parsingOptions, projectOptions)
+                            return ValueSome struct (parsingOptions, projectOptions)
 
-            | true, (oldProject, parsingOptions, projectOptions) ->
+            | true, struct (oldProject, parsingOptions, projectOptions) ->
                 let! isInvalidated = isProjectInvalidated oldProject project
 
                 if isInvalidated then
                     cache.TryRemove(projectId) |> ignore
                     return! tryComputeOptions project
                 else
-                    return ValueSome(parsingOptions, projectOptions)
+                    return ValueSome struct (parsingOptions, projectOptions)
         }
 
     let loop (agent: MailboxProcessor<FSharpProjectOptionsMessage>) =
@@ -714,7 +708,7 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
 
                 | FSharpProjectOptionsMessage.ClearOptions(projectId) ->
                     match cache.TryRemove(projectId) with
-                    | true, (_, _, projectOptions) ->
+                    | true, struct (_, _, projectOptions) ->
                         lastSuccessfulCompilations.TryRemove(projectId) |> ignore
                         emitCache.TryRemove(projectId) |> ignore
                         checker.ClearCache([ projectOptions ])
@@ -781,16 +775,13 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
     interface IDisposable with
         member this.Dispose() =
             this.ClearAllCaches()
-
-            referenceChangeTracker
-            |> Option.iter (fun tracker -> (tracker :> IDisposable).Dispose())
-
+            (referenceChangeTracker :> IDisposable).Dispose()
             cancellationTokenSource.Cancel()
             cancellationTokenSource.Dispose()
             (agent :> IDisposable).Dispose()
 
 /// Manages mappings of Roslyn workspace Projects/Documents to FCS.
-type internal FSharpProjectOptionsManager(checker: FSharpChecker, workspace: Workspace, ?fileChangeWatcher: IFSharpFileChangeWatcher) =
+type internal FSharpProjectOptionsManager(checker: FSharpChecker, workspace: Workspace, fileChangeWatcher: IFSharpFileChangeWatcher) =
 
     let reactor = new FSharpProjectOptionsReactor(checker, fileChangeWatcher)
 
