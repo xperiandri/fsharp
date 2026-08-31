@@ -15,13 +15,16 @@ open Microsoft.CodeAnalysis.Options
 open FSharp.Compiler
 open FSharp.Compiler.CodeAnalysis
 open FSharp.NativeInterop
+open Microsoft.ServiceHub.Framework
 open Microsoft.VisualStudio
+open Microsoft.VisualStudio.Copilot
 open Microsoft.VisualStudio.FSharp.Editor
 open Microsoft.VisualStudio.LanguageServices
 open Microsoft.VisualStudio.LanguageServices.Implementation.LanguageService
 open Microsoft.VisualStudio.LanguageServices.Implementation.ProjectSystem
 open Microsoft.VisualStudio.Shell
 open Microsoft.VisualStudio.Shell.Interop
+open Microsoft.VisualStudio.Shell.ServiceBroker
 open Microsoft.VisualStudio.Text.Outlining
 open Microsoft.CodeAnalysis.ExternalAccess.FSharp
 open Microsoft.CodeAnalysis.Host.Mef
@@ -424,12 +427,44 @@ type internal FSharpPackage() as this =
                 |> CancellableTask.startAsTask cancellationToken)
         )
 
-#if DEBUG
     override this.RegisterOnAfterPackageLoadedAsyncWork(afterPackageLoadedTasks: PackageLoadTasks) =
         // The base task is what calls RegisterObjectBrowserLibraryManager; without it Debug builds
         // would silently have no Object Browser.
         base.RegisterOnAfterPackageLoadedAsyncWork(afterPackageLoadedTasks)
 
+        afterPackageLoadedTasks.AddTask(
+            false,
+            fun _ cancellationToken ->
+                task {
+                    let! container = this.GetServiceAsync(typeof<SVsBrokeredServiceContainer>)
+
+                    match container with
+                    | :? IBrokeredServiceContainer as container ->
+                        // The Interactions service also serves the registration interface. It is absent when
+                        // GitHub Copilot is not installed, in which case the proxy is null and F# stays out of the picker.
+                        let! registration =
+                            container
+                                .GetFullAccessServiceBroker()
+                                .GetProxyAsync<ICopilotRegistrationService>(CopilotDescriptors.InteractionService, cancellationToken)
+
+                        use registration = registration
+
+                        match registration with
+                        | null -> ()
+                        | registration ->
+                            let moniker =
+                                ServiceMoniker(
+                                    FSharpConstants.copilotSymbolProviderName,
+                                    Version CopilotDescriptors.CurrentContextProviderVersion
+                                )
+
+                            do! registration.RegisterContextProviderAsync(moniker, cancellationToken)
+                    | _ -> ()
+                }
+                :> Task
+        )
+
+#if DEBUG
         afterPackageLoadedTasks.AddTask(
             false,
             fun _ _ ->
