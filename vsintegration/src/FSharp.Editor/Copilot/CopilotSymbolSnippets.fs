@@ -1,51 +1,40 @@
 // Copyright (c) Microsoft Corporation.  All Rights Reserved.  See License.txt in the project root for license information.
 
-module internal Microsoft.VisualStudio.FSharp.Editor.CopilotSymbolSnippets
-
-open System
-open System.Collections.Generic
+namespace Microsoft.VisualStudio.FSharp.Editor
 
 open FSharp.Compiler.EditorServices
 
-[<Literal>]
-let MaxSnippetLines = 200
+/// Widens the identifier range of a navigable item to the declaration a reader would recognise.
+module internal CopilotSymbolSnippets =
 
-/// A scope's header runs from its Range start, over its doc comment, to its CollapseRange start.
-let declaredByLine (scopes: Structure.ScopeRange seq) =
-    let declared = Dictionary<int, Structure.ScopeRange>()
+    /// A module scope can span a whole file, which is more than a chat prompt can usefully carry.
+    [<Literal>]
+    let MaxSnippetLines = 200
 
-    for scope in scopes do
-        if
-            scope.Scope <> Structure.Scope.Comment
+    /// Inclusive, 1-based line bounds of the declaration `item` names, including its doc comment.
+    let definitionLines (scopes: Structure.ScopeRange seq) (item: NavigableItem) =
+        let declarationLine = item.Range.StartLine
+
+        // A construct's outlining range reaches back over the doc comment in front of it, so it is the
+        // collapse range - the body proper - that tells which construct is declared on this line.
+        let declaredHere (scope: Structure.ScopeRange) =
+            scope.CollapseRange.StartLine = declarationLine
+            && scope.Range.EndLine >= item.Range.EndLine
+            && scope.Scope <> Structure.Scope.Comment
             && scope.Scope <> Structure.Scope.XmlDocComment
-        then
-            for line in scope.Range.StartLine .. scope.CollapseRange.StartLine do
-                match declared.TryGetValue line with
-                | true, widest when widest.Range.EndLine >= scope.Range.EndLine -> ()
-                | _ -> declared[line] <- scope
 
-    declared
+        let mutable widest = ValueNone
 
-let declarationLines (sourceLines: string array) (declared: Dictionary<int, Structure.ScopeRange>) (item: NavigableItem) =
-    let declarationLine = item.Range.StartLine
+        for scope in scopes do
+            if declaredHere scope then
+                match widest with
+                | ValueSome(previous: Structure.ScopeRange) when previous.Range.EndLine >= scope.Range.EndLine -> ()
+                | _ -> widest <- ValueSome scope
 
-    let firstLine, lastLine =
-        match declared.TryGetValue declarationLine with
-        | true, scope when scope.Range.EndLine >= item.Range.EndLine -> scope.Range.StartLine, scope.Range.EndLine
-        | _ -> declarationLine, item.Range.EndLine
+        // A one-line member declares no scope of its own; it stands for itself rather than for the type around it.
+        let firstLine, lastLine =
+            match widest with
+            | ValueSome scope -> scope.Range.StartLine, scope.Range.EndLine
+            | ValueNone -> declarationLine, item.Range.EndLine
 
-    // Outlining reports no scope for a one-line "///", so walk back over it by text.
-    let isDocComment line =
-        sourceLines[line - 1].AsSpan().TrimStart().StartsWith("///".AsSpan(), StringComparison.Ordinal)
-
-    let rec docCommentStart line =
-        if line > 1 && isDocComment (line - 1) then
-            docCommentStart (line - 1)
-        else
-            line
-
-    struct (docCommentStart firstLine, lastLine)
-
-let definitionLines (sourceLines: string array) (declared: Dictionary<int, Structure.ScopeRange>) (item: NavigableItem) =
-    let struct (firstLine, lastLine) = declarationLines sourceLines declared item
-    struct (firstLine, min lastLine (firstLine + MaxSnippetLines - 1))
+        firstLine, min lastLine (firstLine + MaxSnippetLines - 1)

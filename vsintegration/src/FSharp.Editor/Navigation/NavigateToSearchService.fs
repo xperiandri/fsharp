@@ -19,6 +19,8 @@ open Microsoft.VisualStudio.Text.PatternMatching
 open FSharp.Compiler.EditorServices
 open CancellableTasks
 
+/// Parse-tree navigable items per document, cached on the document's text version.
+/// Shared by NavigateTo and by the Copilot chat mention provider.
 [<Export; Shared>]
 type internal FSharpNavigableItemsCache
     [<ImportingConstructor>]
@@ -46,12 +48,6 @@ type internal FSharpNavigableItemsCache
                 cache[document.Id] <- currentVersion, items
                 return items
         }
-
-    /// Uses the version the document already knows: asking for it could read a closed file from disk.
-    member _.TryGetCachedNavigableItems(document: Document) =
-        match cache.TryGetValue document.Id, document.TryGetTextVersion() with
-        | (true, (version, items)), (true, currentVersion) when version = currentVersion -> ValueSome items
-        | _ -> ValueNone
 
     member _.CreateMatcherFor(searchPattern: string) =
         let patternMatcher =
