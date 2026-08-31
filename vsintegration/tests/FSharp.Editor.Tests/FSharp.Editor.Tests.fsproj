@@ -38,6 +38,7 @@
     <Compile Include="CopilotContextProviderTests.fs" />
     <Compile Include="ObjectBrowserNavInfoTests.fs" />
     <Compile Include="ObjectBrowserListTests.fs" />
+    <Compile Include="CopilotContextProviderTests.fs" />
     <Compile Include="CodeFixes\CodeFixTestFramework.fs" />
     <Compile Include="ActivePatternEditorTests.fs" />
     <Compile Include="CodeFixes\AddInstanceMemberParameterTests.fs" />

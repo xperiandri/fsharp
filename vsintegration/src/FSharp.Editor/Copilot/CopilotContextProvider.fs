@@ -6,7 +6,6 @@ open System
 open System.Collections.Generic
 open System.ComponentModel.Composition
 open System.IO
-open System.Diagnostics
 open System.Threading.Tasks
 
 open Microsoft.CodeAnalysis
@@ -17,91 +16,98 @@ open Microsoft.VisualStudio.Copilot
 open Microsoft.VisualStudio.LanguageServices
 open Microsoft.VisualStudio.Shell
 open Microsoft.VisualStudio.Shell.ServiceBroker
-open Microsoft.VisualStudio.Text.PatternMatching
 
 open FSharp.Compiler.EditorServices
 open CancellableTasks
 
-[<Struct>]
-type internal PickedDeclaration =
-    {
-        File: string
-        ProjectName: string
-        Line: int
-    }
-
-[<RequireQualifiedAccess>]
-type internal DocumentFocus =
-    | Selected
-    | Focused
-    | Open
-    | Elsewhere
-
+/// Solution-wide lookup of F# declarations behind the Copilot chat "#" mention picker.
+/// Kept apart from the brokered service so it can be exercised without a Visual Studio workspace.
 module internal CopilotSymbolQuery =
 
     [<Literal>]
     let private MaxMentions = 20
 
+    /// Overloads and partial definitions share one fully qualified name; a handful of them is plenty of context.
     [<Literal>]
     let private MaxDeclarations = 4
 
     [<Literal>]
     let private UserOpName = "CopilotSymbolContext"
 
-    /// Copilot drops the partial answer of a cancelled query, so a long cold scan stops itself instead.
-    [<Literal>]
-    let private ColdSearchBudgetMs = 1500L
-
-    [<Literal>]
-    let private MinSolutionWideSearchLength = 3
-
-    let private parallelism = max 1 (Environment.ProcessorCount - 1)
-
-    let private matcherFor (cache: FSharpNavigableItemsCache) (searchText: string) =
-        match searchText with
-        | "" -> fun (_: NavigableItem) -> ValueSome(PatternMatch(PatternMatchKind.Exact, false, false))
-        | searchText -> cache.CreateMatcherFor searchText
-
     let private fsharpDocuments (solution: Solution) =
-        solution.Projects |> Seq.where _.IsFSharp |> Seq.collect _.Documents
-
-    let private isFocused (focus: EditorFocus) (document: Document) =
-        String.Equals(focus.FilePath, document.FilePath, StringComparison.OrdinalIgnoreCase)
-
-    let private documentFocusOf
-        (focus: EditorFocus voption)
-        (openIds: HashSet<DocumentId>)
-        (isSelected: NavigableItem -> bool)
-        (document: Document)
-        (item: NavigableItem)
-        =
-        if not (openIds.Contains document.Id) then
-            DocumentFocus.Elsewhere
-        else
-            match focus with
-            | ValueSome focus when isFocused focus document ->
-                if isSelected item then
-                    DocumentFocus.Selected
-                else
-                    DocumentFocus.Focused
-            | _ -> DocumentFocus.Open
-
-    let private rankOf focus =
-        match focus with
-        | DocumentFocus.Selected -> 0
-        | DocumentFocus.Focused -> 1
-        | DocumentFocus.Open -> 2
-        | DocumentFocus.Elsewhere -> 3
-
-    [<Struct>]
-    type private Outline =
-        {
-            Text: SourceText
-            Lines: string array
-            Declared: Dictionary<int, Structure.ScopeRange>
+        seq {
+            for project in solution.Projects do
+                if project.Language = FSharpConstants.FSharpLanguageName then
+                    yield! project.Documents
         }
 
-    let private outlineOf (document: Document) =
+    let describe (item: NavigableItem) (document: Document) =
+        let container =
+            match item.Container.FullName with
+            | "" -> Path.GetFileName document.FilePath
+            | name -> name
+
+        if document.IsFSharpSignatureFile then
+            $"signature, {container} - {document.Project.Name}"
+        else
+            $"{container} - {document.Project.Name}"
+
+    /// Declarations whose fully qualified name matches `searchText`, best match first, one entry per name.
+    let search (cache: FSharpNavigableItemsCache) (solution: Solution) (searchText: string) =
+        cancellableTask {
+            let! ct = CancellableTask.getCancellationToken ()
+            let tryMatch = cache.CreateMatcherFor searchText
+            let hits = ResizeArray()
+
+            for document in fsharpDocuments solution do
+                ct.ThrowIfCancellationRequested()
+                let! items = cache.GetNavigableItems document
+
+                for item in items do
+                    match tryMatch item with
+                    | ValueSome patternMatch -> hits.Add(struct (patternMatch.Kind, item, document))
+                    | ValueNone -> ()
+
+            return
+                hits
+                |> Seq.sortBy (fun (struct (kind, item: NavigableItem, document: Document)) ->
+                    document.IsFSharpSignatureFile, kind, item.Name.Length)
+                |> Seq.distinctBy (fun (struct (_, item, _)) -> CopilotSymbolMapping.fullyQualifiedName item)
+                |> Seq.truncate MaxMentions
+                |> Seq.map (fun (struct (_, item, document)) -> struct (item, document))
+                |> Seq.toArray
+        }
+
+    /// Declarations carrying exactly this fully qualified name. Signature files answer only when no
+    /// implementation declares the name.
+    let declarationsOf (cache: FSharpNavigableItemsCache) (solution: Solution) (fullyQualifiedName: string) =
+        cancellableTask {
+            let! ct = CancellableTask.getCancellationToken ()
+            let hits = ResizeArray()
+
+            for document in fsharpDocuments solution do
+                ct.ThrowIfCancellationRequested()
+                let! items = cache.GetNavigableItems document
+
+                for item in items do
+                    if String.Equals(CopilotSymbolMapping.fullyQualifiedName item, fullyQualifiedName, StringComparison.Ordinal) then
+                        hits.Add(struct (item, document))
+
+            let implementations =
+                hits
+                |> Seq.filter (fun (struct (_, document: Document)) -> not document.IsFSharpSignatureFile)
+
+            let preferred =
+                if Seq.isEmpty implementations then
+                    hits :> _ seq
+                else
+                    implementations
+
+            return preferred |> Seq.truncate MaxDeclarations |> Seq.toArray
+        }
+
+    /// The source of the whole declaration `item` names, together with the span it occupies.
+    let snippetOf (item: NavigableItem) (document: Document) =
         cancellableTask {
             let! ct = CancellableTask.getCancellationToken ()
             let! sourceText = document.GetTextAsync ct
@@ -110,354 +116,30 @@ module internal CopilotSymbolQuery =
             let sourceLines =
                 Array.init sourceText.Lines.Count (fun line -> sourceText.Lines[line].ToString())
 
-            return
-                {
-                    Text = sourceText
-                    Lines = sourceLines
-                    Declared =
-                        Structure.getOutliningRanges sourceLines parseResults.ParseTree
-                        |> CopilotSymbolSnippets.declaredByLine
-                }
+            let scopes = Structure.getOutliningRanges sourceLines parseResults.ParseTree
+            let firstLine, lastLine = CopilotSymbolSnippets.definitionLines scopes item
+
+            let firstLine = max 1 firstLine
+            let lastLine = min sourceText.Lines.Count lastLine
+
+            let span =
+                TextSpan.FromBounds(sourceText.Lines[firstLine - 1].Start, sourceText.Lines[lastLine - 1].End)
+
+            return struct (sourceText.GetSubText(span).ToString(), span)
         }
 
-    let private notSelected (_: NavigableItem) = false
-
-    let private isSelectedIn (focus: EditorFocus) (document: Document) =
+    let symbolContext (cache: FSharpNavigableItemsCache) (solution: Solution) (fullyQualifiedName: string) =
         cancellableTask {
-            let! outline = outlineOf document
+            let! declarations = declarationsOf cache solution fullyQualifiedName
 
-            return
-                fun (item: NavigableItem) ->
-                    let struct (firstLine, lastLine) =
-                        CopilotSymbolSnippets.declarationLines outline.Lines outline.Declared item
-
-                    firstLine <= focus.LastLine && focus.FirstLine <= lastLine
-        }
-
-    let tiers (cache: FSharpNavigableItemsCache) (openIds: HashSet<DocumentId>) (solution: Solution) =
-        let opened =
-            openIds
-            |> Seq.chooseV (fun id ->
-                match solution.GetDocument id with
-                | null -> ValueNone
-                | document when document.Project.IsFSharp -> ValueSome document
-                | _ -> ValueNone)
-            |> ResizeArray
-
-        let unopened =
-            seq {
-                for document in fsharpDocuments solution do
-                    if not (openIds.Contains document.Id) then
-                        document
-            }
-
-        // Navigate To fills the same cache between the two walks: cold is what the cached walk did not answer.
-        let answered = HashSet<DocumentId>()
-
-        let cached =
-            seq {
-                for document in unopened do
-                    match cache.TryGetCachedNavigableItems document with
-                    | ValueSome items ->
-                        answered.Add document.Id |> ignore
-                        struct (document, items)
-                    | ValueNone -> ()
-            }
-
-        let cold =
-            seq {
-                for document in unopened do
-                    if not (answered.Contains document.Id) then
-                        document
-            }
-
-        struct (opened, cached, cold)
-
-    let private scanTiers
-        (cache: FSharpNavigableItemsCache)
-        (openIds: HashSet<DocumentId>)
-        (solution: Solution)
-        (budgetMs: int64)
-        (enough: unit -> bool)
-        (collect: Document -> NavigableItem array -> unit)
-        =
-        cancellableTask {
-            let! ct = CancellableTask.getCancellationToken ()
-            let struct (opened, cached, cold) = tiers cache openIds solution
-
-            let parseAndCollect (document: Document) =
-                cancellableTask {
-                    let! items = cache.GetNavigableItems document
-                    collect document items
-                }
-
-            do! Task.parallelDoLimit parallelism ct (opened |> Seq.map parseAndCollect)
-
-            if not (enough ()) then
-                for struct (document, items) in cached do
-                    ct.ThrowIfCancellationRequested()
-                    collect document items
-
-            if not (enough ()) then
-                let budget = Stopwatch.StartNew()
-
-                let scan (document: Document) =
-                    cancellableTask {
-                        // Gates the next parse rather than cancelling one: a session's first query must survive its first parse.
-                        if budget.ElapsedMilliseconds < budgetMs && not (enough ()) then
-                            do! parseAndCollect document
-                    }
-
-                do! Task.parallelDoLimit parallelism ct (cold |> Seq.map scan)
-        }
-
-    [<Struct>]
-    type private Hit =
-        {
-            Kind: PatternMatchKind
-            Item: NavigableItem
-            Document: Document
-            Name: string
-        }
-
-    let private compareRanked (struct (rank1: int, hit1: Hit)) (struct (rank2: int, hit2: Hit)) =
-        match compare rank1 rank2 with
-        | 0 ->
-            match compare (int hit1.Kind) (int hit2.Kind) with
-            | 0 -> compare hit1.Item.Name.Length hit2.Item.Name.Length
-            | order -> order
-        | order -> order
-
-    let search
-        (cache: FSharpNavigableItemsCache)
-        (openDocumentIds: DocumentId seq)
-        (focus: EditorFocus voption)
-        (solution: Solution)
-        (searchTexts: string[])
-        =
-        cancellableTask {
-            let openIds = HashSet openDocumentIds
-
-            let queries =
-                searchTexts
-                |> Array.map (fun text ->
-                    struct {|
-                        TryMatch = matcherFor cache text
-                        SolutionWide = text.Length >= MinSolutionWideSearchLength
-                        Hits = ResizeArray<Hit>()
-                        Names = HashSet StringComparer.Ordinal
-                    |})
-
-            let solutionWide = queries |> Array.filter _.SolutionWide
-            let gate = obj ()
-            let mutable focusedDocument = ValueNone
-
-            let collect (document: Document) (items: NavigableItem array) =
-                let queries =
-                    if openIds.Contains document.Id then
-                        queries
-                    else
-                        solutionWide
-
-                let matched =
-                    queries
-                    |> Array.map (fun query ->
-                        let hits = ResizeArray()
-
-                        for item in items do
-                            match query.TryMatch item with
-                            | ValueSome patternMatch ->
-                                hits.Add
-                                    {
-                                        Kind = patternMatch.Kind
-                                        Item = item
-                                        Document = document
-                                        Name = CopilotSymbolMapping.fullyQualifiedName item
-                                    }
-                            | ValueNone -> ()
-
-                        struct (query, hits))
-
-                lock gate (fun () ->
-                    for struct (query, hits) in matched do
-                        query.Hits.AddRange hits
-
-                        if query.SolutionWide then
-                            for hit in hits do
-                                if query.Names.Count < MaxMentions then
-                                    query.Names.Add hit.Name |> ignore
-
-                    match focus with
-                    | ValueSome focus when
-                        isFocused focus document
-                        && matched |> Array.exists (fun (struct (_, hits)) -> hits.Count > 0)
-                        ->
-                        focusedDocument <- ValueSome document
-                    | _ -> ())
-
-            let enough () =
-                lock gate (fun () -> solutionWide |> Array.forall (fun query -> query.Names.Count >= MaxMentions))
-
-            do! scanTiers cache openIds solution ColdSearchBudgetMs enough collect
-
-            let! isSelected =
-                match focus, focusedDocument with
-                | ValueSome focus, ValueSome document -> isSelectedIn focus document
-                | _ -> CancellableTask.singleton notSelected
-
-            return
-                queries
-                |> Array.map (fun query ->
-                    let seen = HashSet StringComparer.Ordinal
-                    let mentions = ResizeArray MaxMentions
-
-                    let ranked =
-                        query.Hits
-                        |> Seq.map (fun hit ->
-                            let focus = documentFocusOf focus openIds isSelected hit.Document hit.Item
-                            struct (rankOf focus * 2 + (if hit.Document.IsFSharpSignatureFile then 1 else 0), hit), focus)
-                        |> Seq.sortWith (fun (ranked1, _) (ranked2, _) -> compareRanked ranked1 ranked2)
-
-                    for struct (_, hit), focus in ranked do
-                        if mentions.Count < MaxMentions && seen.Add hit.Name then
-                            mentions.Add(struct (hit.Item, hit.Document, focus))
-
-                    mentions.ToArray())
-        }
-
-    let private declarationsFound
-        (cache: FSharpNavigableItemsCache)
-        (openDocumentIds: DocumentId seq)
-        (solution: Solution)
-        (fullyQualifiedName: string)
-        =
-        cancellableTask {
-            let hits = ResizeArray()
-            let mutable declaredInImplementation = false
-
-            let collect (document: Document) (items: NavigableItem array) =
-                let declared =
-                    items
-                    |> Array.filter (CopilotSymbolMapping.hasFullyQualifiedName fullyQualifiedName)
-
-                if declared.Length > 0 then
-                    lock hits (fun () ->
-                        for item in declared do
-                            hits.Add(struct (item, document))
-
-                        if not document.IsFSharpSignatureFile then
-                            declaredInImplementation <- true)
-
-            let enough () =
-                lock hits (fun () -> declaredInImplementation)
-
-            do! scanTiers cache (HashSet openDocumentIds) solution Int64.MaxValue enough collect
-
-            let implementations =
-                hits
-                |> Seq.filter (fun (struct (_, document: Document)) -> not document.IsFSharpSignatureFile)
-                |> Seq.toArray
-
-            return
-                match implementations with
-                | [||] -> hits.ToArray()
-                | implementations -> implementations
-        }
-
-    /// The picked project's copy of a linked file answers first: its defines decide what is declared where.
-    let private declarationsPickedAt
-        (cache: FSharpNavigableItemsCache)
-        (solution: Solution)
-        (fullyQualifiedName: string)
-        (picked: PickedDeclaration)
-        =
-        cancellableTask {
-            let inFile =
-                solution.GetDocumentIdsWithFilePath picked.File
-                |> Seq.map (fun documentId -> solution.GetDocument documentId)
-                |> Seq.filter (fun document -> document.Project.IsFSharp && not document.IsFSharpSignatureFile)
-                |> Seq.toArray
-
-            let isPickedProject (document: Document) =
-                String.Equals(document.Project.Name, picked.ProjectName, StringComparison.Ordinal)
-
-            let documents =
-                match Array.filter isPickedProject inFile with
-                | [||] -> inFile
-                | inPickedProject -> inPickedProject
-
-            let found = ResizeArray()
-
-            for document in documents do
-                let! items = cache.GetNavigableItems document
-
-                for item in items do
-                    if CopilotSymbolMapping.hasFullyQualifiedName fullyQualifiedName item then
-                        found.Add(struct (item, document))
-
-            return
-                found
-                |> Seq.sortBy (fun (struct (item, _)) -> item.Range.StartLine <> picked.Line)
-                |> Seq.toArray
-        }
-
-    let declarationsOf
-        (cache: FSharpNavigableItemsCache)
-        (openDocumentIds: DocumentId seq)
-        (solution: Solution)
-        (fullyQualifiedName: string)
-        (picked: PickedDeclaration voption)
-        =
-        cancellableTask {
-            let! pickedDeclarations =
-                match picked with
-                | ValueSome picked -> declarationsPickedAt cache solution fullyQualifiedName picked
-                | ValueNone -> CancellableTask.singleton Array.empty
-
-            match pickedDeclarations with
-            | [||] -> return! declarationsFound cache openDocumentIds solution fullyQualifiedName
-            | declarations -> return declarations
-        }
-
-    let private snippetOf (outline: Outline) (item: NavigableItem) =
-        let struct (firstLine, lastLine) =
-            CopilotSymbolSnippets.definitionLines outline.Lines outline.Declared item
-
-        let text = outline.Text
-        let firstLine = max 1 firstLine
-        let lastLine = min text.Lines.Count lastLine
-
-        let span =
-            TextSpan.FromBounds(text.Lines[firstLine - 1].Start, text.Lines[lastLine - 1].End)
-
-        struct (text.ToString span, span)
-
-    let symbolContext
-        (cache: FSharpNavigableItemsCache)
-        (openDocumentIds: DocumentId seq)
-        (solution: Solution)
-        (fullyQualifiedName: string)
-        (picked: PickedDeclaration voption)
-        =
-        cancellableTask {
-            let! declarations = declarationsOf cache openDocumentIds solution fullyQualifiedName picked
-            let declarations = Array.truncate MaxDeclarations declarations
-
-            match Array.tryHeadV declarations with
-            | ValueNone -> return ValueNone
-            | ValueSome(struct (first, _)) ->
+            match Array.tryHead declarations with
+            | None -> return ValueNone
+            | Some(struct (first, _)) ->
                 let snippets = ResizeArray()
                 let locations = ResizeArray()
-                let mutable outlined: struct (DocumentId * Outline) voption = ValueNone
 
-                for struct (item, document: Document) in declarations do
-                    let! outline =
-                        match outlined with
-                        | ValueSome(struct (id, outline)) when id = document.Id -> CancellableTask.singleton outline
-                        | _ -> outlineOf document
-
-                    outlined <- ValueSome(struct (document.Id, outline))
-                    let struct (text, span) = snippetOf outline item
+                for struct (item, document) in declarations do
+                    let! struct (text, span) = snippetOf item document
                     snippets.Add text
                     locations.Add(SnippetLocation(document.FilePath, CopilotSpan(span.Start, span.Length)))
 
@@ -473,39 +155,15 @@ module internal CopilotSymbolQuery =
                     )
         }
 
+/// Offers F# declarations to Copilot chat, which merges them into the picker shown for "#".
+/// Copilot's own symbol provider reads the Roslyn compilation, which F# projects do not have.
 [<ExportBrokeredService(FSharpConstants.copilotSymbolProviderName,
                         CopilotDescriptors.CurrentContextProviderVersion,
                         [| typeof<ICopilotMentionQueryable>; typeof<ICopilotMentionBatchQueryable> |],
                         Audience = (ServiceAudience.PublicSdk ||| ServiceAudience.Local))>]
 type internal FSharpCopilotContextProvider
     [<ImportingConstructor>]
-    (
-        cache: FSharpNavigableItemsCache,
-        [<Import(typeof<SVsFullAccessServiceBroker>)>] serviceBroker: IServiceBroker,
-        [<Import(AllowDefault = true)>] workspace: VisualStudioWorkspace | null
-    ) =
-
-    // Never disposed: disposing it would dispose the broker it wraps.
-    let documentContexts =
-        new ServiceBrokerClient(serviceBroker, ThreadHelper.JoinableTaskFactory)
-
-    let editorFocus () =
-        cancellableTask {
-            let! ct = CancellableTask.getCancellationToken ()
-            use! rental = documentContexts.GetProxyAsync<ICopilotDocumentContextProvider>(CopilotDescriptors.Context.Document, ct).AsTask()
-
-            match rental.Proxy with
-            | null -> return ValueNone
-            | proxy ->
-                let! context = proxy.GetActiveDocumentAsync(CopilotCorrelationId.New(), ct)
-
-                match context with
-                | null -> return ValueNone
-                | context ->
-                    match context.TryGetValue<DocumentContext>() with
-                    | true, document -> return CopilotSymbolMapping.editorFocusOf document
-                    | _ -> return ValueNone
-        }
+    (cache: FSharpNavigableItemsCache, [<Import(AllowDefault = true)>] workspace: VisualStudioWorkspace) =
 
     static let moniker =
         ServiceMoniker(FSharpConstants.copilotSymbolProviderName, Version CopilotDescriptors.CurrentContextProviderVersion)
@@ -522,24 +180,6 @@ type internal FSharpCopilotContextProvider
                     CopilotDefaultTypes.StringName,
                     IsRequired = true
                 )
-                CopilotInputDescriptor(
-                    CopilotSymbolMapping.DeclarationFileInput,
-                    "File the picked declaration is in.",
-                    CopilotDefaultTypes.StringName,
-                    IsRequired = false
-                )
-                CopilotInputDescriptor(
-                    CopilotSymbolMapping.DeclarationProjectInput,
-                    "Project the picked declaration is compiled in.",
-                    CopilotDefaultTypes.StringName,
-                    IsRequired = false
-                )
-                CopilotInputDescriptor(
-                    CopilotSymbolMapping.DeclarationLineInput,
-                    "Line the picked overload or partial definition is declared on.",
-                    CopilotDefaultTypes.IntegerName,
-                    IsRequired = false
-                )
             |]
         )
 
@@ -550,92 +190,61 @@ type internal FSharpCopilotContextProvider
     static let noMentions =
         Array.empty<CopilotQueriedMention> :> IReadOnlyCollection<CopilotQueriedMention>
 
-    let priorityOf focus =
-        match focus with
-        | DocumentFocus.Selected -> CopilotQueriedMentionPriority.Selection
-        | DocumentFocus.Focused -> CopilotQueriedMentionPriority.High
-        | DocumentFocus.Open -> CopilotQueriedMentionPriority.Low
-        | DocumentFocus.Elsewhere -> CopilotQueriedMentionPriority.None
-
-    let mentionFor (item: NavigableItem) (document: Document) focus =
-        let inputs = Dictionary<string, CopilotValue>(4, StringComparer.Ordinal)
+    let mentionFor (item: NavigableItem) (document: Document) =
+        let inputs = Dictionary<string, CopilotValue>(StringComparer.Ordinal)
 
         inputs[CopilotSymbolMapping.FullyQualifiedNameInput] <-
             CopilotValue(CopilotDefaultTypes.StringName, CopilotSymbolMapping.fullyQualifiedName item)
 
-        match document.FilePath with
-        | null -> ()
-        | filePath ->
-            inputs[CopilotSymbolMapping.DeclarationFileInput] <- CopilotValue(CopilotDefaultTypes.StringName, filePath)
-            inputs[CopilotSymbolMapping.DeclarationProjectInput] <- CopilotValue(CopilotDefaultTypes.StringName, document.Project.Name)
-
-        inputs[CopilotSymbolMapping.DeclarationLineInput] <- CopilotValue(CopilotDefaultTypes.IntegerName, item.Range.StartLine)
-
-        let fileName = Path.GetFileName document.FilePath
-
-        let tooltip =
-            String.Format(
-                SR.CopilotSymbolTooltip(),
-                CopilotSymbolMapping.symbolContextType item.Kind,
-                fileName,
-                CopilotSymbolMapping.tooltipName item
-            )
+        let description = CopilotSymbolQuery.describe item document
 
         CopilotQueriedContextMention(
             moniker,
             descriptor,
             inputs,
             item.Name,
-            Description = fileName,
-            Tooltip = tooltip,
+            Description = description,
+            Tooltip = description,
             Icon = Nullable(CopilotSymbolMapping.icon item.Kind),
-            IsNavigable = true,
-            Priority = priorityOf focus
+            IsNavigable = true
         )
         :> CopilotQueriedMention
 
-    let mentionsFor (searchTexts: string voption[]) =
+    /// The user is still typing, so the trailing input is the search text. It is preceded by the member
+    /// name once the mention has been committed, as in "#fsharpSymbol:Namespace.Type".
+    let searchTextOf (query: CopilotMentionQuery) =
+        match query.Type, query.Inputs with
+        | CopilotMentionType.Context, null -> ValueNone
+        | CopilotMentionType.Context, inputs when inputs.Count > 0 ->
+            match inputs[inputs.Count - 1] with
+            | text when String.IsNullOrWhiteSpace text -> ValueNone
+            | text when String.Equals(text, CopilotSymbolMapping.SymbolMember, StringComparison.Ordinal) -> ValueNone
+            | text -> ValueSome text
+        | _ -> ValueNone
+
+    let queryMentions (query: CopilotMentionQuery) =
         cancellableTask {
-            match workspace, searchTexts |> Seq.chooseV id |> Seq.distinct |> Seq.toArray with
+            match workspace, searchTextOf query with
             | null, _
-            | _, [||] -> return Array.create searchTexts.Length noMentions
-            | workspace, distinct ->
-                let! focus = editorFocus ()
-
-                let! hits = CopilotSymbolQuery.search cache (workspace.GetOpenDocumentIds()) focus workspace.CurrentSolution distinct
-
-                let byText = Dictionary(StringComparer.Ordinal)
-
-                for index in 0 .. distinct.Length - 1 do
-                    byText[distinct[index]] <-
-                        hits[index]
-                        |> Array.map (fun (struct (item, document, focus)) -> mentionFor item document focus)
-                        :> IReadOnlyCollection<CopilotQueriedMention>
+            | _, ValueNone -> return noMentions
+            | workspace, ValueSome searchText ->
+                let! hits = CopilotSymbolQuery.search cache workspace.CurrentSolution searchText
 
                 return
-                    searchTexts
-                    |> Array.map (function
-                        | ValueSome text -> byText[text]
-                        | ValueNone -> noMentions)
+                    hits |> Array.map (fun (struct (item, document)) -> mentionFor item document)
+                    :> IReadOnlyCollection<CopilotQueriedMention>
         }
 
-    let fullyQualifiedNameOf inputs =
-        CopilotSymbolMapping.textOf CopilotSymbolMapping.FullyQualifiedNameInput inputs
-
-    let pickedAt inputs =
-        match
-            CopilotSymbolMapping.textOf CopilotSymbolMapping.DeclarationFileInput inputs,
-            CopilotSymbolMapping.textOf CopilotSymbolMapping.DeclarationProjectInput inputs,
-            CopilotSymbolMapping.inputOf<int> CopilotSymbolMapping.DeclarationLineInput inputs
-        with
-        | ValueSome file, ValueSome project, ValueSome line ->
-            ValueSome
-                {
-                    File = file
-                    ProjectName = project
-                    Line = line
-                }
-        | _ -> ValueNone
+    let fullyQualifiedNameOf (inputs: IReadOnlyDictionary<string, CopilotValue>) =
+        match inputs with
+        | null -> ValueNone
+        | inputs ->
+            match inputs.TryGetValue CopilotSymbolMapping.FullyQualifiedNameInput with
+            | true, value ->
+                match value.TryGetValue<string>() with
+                | true, name when not (String.IsNullOrWhiteSpace name) -> ValueSome name
+                | _ -> ValueNone
+            | _ -> ValueNone
 
     interface IExportedBrokeredService with
         member _.Descriptor = CopilotDescriptors.CreateContextProviderDescriptor moniker
@@ -663,13 +272,7 @@ type internal FSharpCopilotContextProvider
                 String.Equals(memberName, CopilotSymbolMapping.SymbolMember, StringComparison.Ordinal)
                 ->
                 cancellableTask {
-                    let! symbol =
-                        CopilotSymbolQuery.symbolContext
-                            cache
-                            (workspace.GetOpenDocumentIds())
-                            workspace.CurrentSolution
-                            fullyQualifiedName
-                            (pickedAt inputs)
+                    let! symbol = CopilotSymbolQuery.symbolContext cache workspace.CurrentSolution fullyQualifiedName
 
                     match symbol with
                     | ValueNone -> return null
@@ -680,9 +283,7 @@ type internal FSharpCopilotContextProvider
 
     interface ICopilotMentionQueryable with
         member _.QueryMentionAsync(query, cancellationToken) : Task<IReadOnlyCollection<CopilotQueriedMention>> =
-            mentionsFor [| CopilotSymbolMapping.searchTextOf query |]
-            |> CancellableTask.map Array.head
-            |> CancellableTask.start cancellationToken
+            queryMentions query |> CancellableTask.start cancellationToken
 
         member _.NavigateToMentionableAsync(mention, cancellationToken) : Task<bool> =
             match workspace, fullyQualifiedNameOf mention.Inputs with
@@ -692,18 +293,11 @@ type internal FSharpCopilotContextProvider
                 cancellableTask {
                     let! ct = CancellableTask.getCancellationToken ()
                     let solution = workspace.CurrentSolution
+                    let! declarations = CopilotSymbolQuery.declarationsOf cache solution fullyQualifiedName
 
-                    let! declarations =
-                        CopilotSymbolQuery.declarationsOf
-                            cache
-                            (workspace.GetOpenDocumentIds())
-                            solution
-                            fullyQualifiedName
-                            (pickedAt mention.Inputs)
-
-                    match Array.tryHeadV declarations with
-                    | ValueNone -> return false
-                    | ValueSome(struct (item, document)) ->
+                    match Array.tryHead declarations with
+                    | None -> return false
+                    | Some(struct (item, document)) ->
                         let! sourceText = document.GetTextAsync ct
 
                         match RoslynHelpers.TryFSharpRangeToTextSpan(sourceText, item.Range) with
@@ -718,8 +312,16 @@ type internal FSharpCopilotContextProvider
                 }
                 |> CancellableTask.start cancellationToken
 
+    // Copilot's own picker providers answer through the batch interface, one result collection per query.
     interface ICopilotMentionBatchQueryable with
         member _.QueryMentionBatchAsync(queries, cancellationToken) : Task<IReadOnlyList<IReadOnlyCollection<CopilotQueriedMention>>> =
-            mentionsFor (queries |> Seq.map CopilotSymbolMapping.searchTextOf |> Seq.toArray)
-            |> CancellableTask.map (fun mentions -> mentions :> IReadOnlyList<IReadOnlyCollection<CopilotQueriedMention>>)
+            cancellableTask {
+                let results = ResizeArray queries.Count
+
+                for query in queries do
+                    let! mentions = queryMentions query
+                    results.Add mentions
+
+                return results :> IReadOnlyList<IReadOnlyCollection<CopilotQueriedMention>>
+            }
             |> CancellableTask.start cancellationToken
