@@ -623,16 +623,40 @@ module internal SignatureOps =
             match entity1.IsNamespace, entity2.IsNamespace, entity1.IsModule, entity2.IsModule with
             | true, true, _, _ -> ()
             | true, _, _, true
-            | _, true, true, _ -> errorR (Error(FSComp.SR.tastNamespaceAndModuleWithSameNameInAssembly (textOfPath path2), entity2.Range))
+            | _, true, true, _ ->
+                errorR (Error(FSComp.SR.tastNamespaceAndModuleWithSameNameInAssembly (richTextOfPath path2), entity2.Range))
             | true, _, _, _
             | _, true, _, _ ->
-                errorR (Error(FSComp.SR.tastNamespaceAndTypeWithSameNameInAssembly (textOfPath path2, entity2.LogicalName), entity2.Range))
+                errorR (
+                    Error(
+                        FSComp.SR.tastNamespaceAndTypeWithSameNameInAssembly (
+                            richTextOfPath path2,
+                            richTextOfEntityName entity2 entity2.LogicalName
+                        ),
+                        entity2.Range
+                    )
+                )
             | false, false, false, false ->
-                errorR (Error(FSComp.SR.tastDuplicateTypeDefinitionInAssembly (entity2.LogicalName, textOfPath path), entity2.Range))
-            | false, false, true, true -> errorR (Error(FSComp.SR.tastTwoModulesWithSameNameInAssembly (textOfPath path2), entity2.Range))
+                errorR (
+                    Error(
+                        FSComp.SR.tastDuplicateTypeDefinitionInAssembly (
+                            richTextOfEntityName entity2 entity2.LogicalName,
+                            richTextOfPath path
+                        ),
+                        entity2.Range
+                    )
+                )
+            | false, false, true, true ->
+                errorR (Error(FSComp.SR.tastTwoModulesWithSameNameInAssembly (richTextOfPath path2), entity2.Range))
             | _ ->
                 errorR (
-                    Error(FSComp.SR.tastConflictingModuleAndTypeDefinitionInAssembly (entity2.LogicalName, textOfPath path), entity2.Range)
+                    Error(
+                        FSComp.SR.tastConflictingModuleAndTypeDefinitionInAssembly (
+                            richTextOfEntityName entity2 entity2.LogicalName,
+                            richTextOfPath path
+                        ),
+                        entity2.Range
+                    )
                 )
 
             entity1
@@ -849,26 +873,33 @@ module internal ExprFreeVars =
     let accFreevarsInTycon opts tcref acc =
         accFreeTyvars opts accFreeTycon tcref acc
 
-    let accFreevarsInVal opts v acc = accFreeTyvars opts accFreeInVal v acc
-
     let accFreeVarsInTraitSln opts tys acc =
         accFreeTyvars opts accFreeInTraitSln tys acc
 
     let accFreeVarsInTraitInfo opts tys acc =
         accFreeTyvars opts accFreeInTrait tys acc
 
+    let inline accFreeTyvarsInVal opts v ftyvs =
+        if opts.collectInTypes then
+            accFreeInVal opts v ftyvs
+        else
+            ftyvs
+
     let boundLocalVal opts v fvs =
         if not opts.includeLocals then
             fvs
         else
-            let fvs = accFreevarsInVal opts v fvs
+            let ftyvs = accFreeTyvarsInVal opts v fvs.FreeTyvars
 
-            if not (Zset.contains v fvs.FreeLocals) then
-                fvs
-            else
+            if Zset.contains v fvs.FreeLocals then
                 { fvs with
+                    FreeTyvars = ftyvs
                     FreeLocals = Zset.remove v fvs.FreeLocals
                 }
+            elif ftyvs === fvs.FreeTyvars then
+                fvs
+            else
+                { fvs with FreeTyvars = ftyvs }
 
     let boundProtect fvs =
         if fvs.UsesMethodLocalConstructs || fvs.ContainsILFieldAccess then
@@ -919,14 +950,13 @@ module internal ExprFreeVars =
         if opts.canCache then tryGetCacheValue cache else ValueNone
 
     let accFreeLocalVal opts v fvs =
-        if not opts.includeLocals then
-            fvs
-        else if Zset.contains v fvs.FreeLocals then
+        if not opts.includeLocals || Zset.contains v fvs.FreeLocals then
             fvs
         else
-            let fvs = accFreevarsInVal opts v fvs
+            let ftyvs = accFreeTyvarsInVal opts v fvs.FreeTyvars
 
             { fvs with
+                FreeTyvars = ftyvs
                 FreeLocals = Zset.add v fvs.FreeLocals
             }
 
@@ -1230,7 +1260,7 @@ module internal ExprFreeVars =
 
         | TOp.Reraise -> accUsesRethrow true acc
 
-        | TOp.TraitCall(TTrait(tys, _, _, argTys, retTy, _, sln)) ->
+        | TOp.TraitCall(TTrait(tys, _, _, argTys, retTy, _, sln, _)) ->
             Option.foldBack
                 (accFreeVarsInTraitSln opts)
                 sln.Value
@@ -1721,8 +1751,7 @@ module internal ExprRemapping =
     and remapExprImpl (ctxt: RemapContext) (compgen: ValCopyFlag) (tmenv: Remap) expr =
 
         // Guard against stack overflow, moving to a whole new stack if necessary
-        ctxt.stackGuard.Guard
-        <| fun () ->
+        ctxt.stackGuard.Guard(fun () ->
 
             match expr with
 
@@ -1841,7 +1870,7 @@ module internal ExprRemapping =
 
             | Expr.WitnessArg(traitInfo, m) ->
                 let traitInfoR = remapTraitInfo tmenv traitInfo
-                Expr.WitnessArg(traitInfoR, m)
+                Expr.WitnessArg(traitInfoR, m))
 
     and remapLambaExpr (ctxt: RemapContext) (compgen: ValCopyFlag) (tmenv: Remap) (ctorThisValOpt, baseValOpt, vs, body, m, bodyTy) =
         let ctorThisValOptR, tmenv =
@@ -2158,8 +2187,12 @@ module internal ExprRemapping =
                 |> Option.map (mapQuadruple (remapValRef tmenv, remapValRef tmenv, remapValRef tmenv, Option.map (remapValRef tmenv)))
             tcaug_adhoc = x.tcaug_adhoc |> NameMap.map (List.map (remapValRef tmenv))
             tcaug_adhoc_list =
-                x.tcaug_adhoc_list
-                |> ResizeArray.map (fun (flag, vref) -> (flag, remapValRef tmenv vref))
+                let remapped: ResizeArray<bool * ValRef> | null =
+                    match x.tcaug_adhoc_list with
+                    | null -> null
+                    | l -> l |> ResizeArray.map (fun (flag, vref) -> (flag, remapValRef tmenv vref))
+
+                remapped
             tcaug_super = x.tcaug_super |> Option.map (remapType tmenv)
             tcaug_interfaces = x.tcaug_interfaces |> List.map (map1Of3 (remapType tmenv))
         }

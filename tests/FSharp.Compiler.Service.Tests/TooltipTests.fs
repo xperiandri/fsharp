@@ -32,7 +32,7 @@ let testXmlDocFallbackToSigFileWhileInImplFile sigSource implSource (expectedCon
 
     let checkResult =
         checker.ParseAndCheckFileInProject("A.fs", 0, Map.find "A.fs" files, projectOptions)
-        |> Async.RunImmediate
+        |> Async.RunSynchronouslyImmediate
 
     match checkResult with
     | _, FSharpCheckFileAnswer.Succeeded(checkResults) ->
@@ -67,7 +67,7 @@ let bar{caret} a b = a - b
 """
 
     testXmlDocFallbackToSigFileWhileInImplFile sigSource implSource "Comment"
-    
+
 
 [<Fact>]
 let ``Display XML doc of signature file for partial AP if implementation doesn't have one`` () =
@@ -87,7 +87,7 @@ let (|IsThr{caret}ee|_|) x = if x = 3 then Some x else None
 """
 
     testXmlDocFallbackToSigFileWhileInImplFile sigSource implSource "Comment"
-    
+
 
 [<Fact>]
 let ``Display XML doc of signature file for DU if implementation doesn't have one`` () =
@@ -100,7 +100,7 @@ type Bar =
     | Case1 of int * string
     | Case2 of string
 """
-               
+
     let implSource =
         """
 module Foo
@@ -197,7 +197,7 @@ type Bar =
     new: unit -> Bar
     member Foo: string
 """
-               
+
     let implSource =
         """
 module Foo
@@ -244,7 +244,7 @@ module Foo
 
 val a: int
 """
-               
+
     let implSource =
         """
 module Fo{caret}o
@@ -258,7 +258,7 @@ let a = 23
 let testToolTipSquashing source =
     let context = Checker.getResolveContext source
     let files = Map.ofArray [| "A.fs", SourceText.ofString context.Source |]
-    
+
     let documentSource fileName = Map.tryFind fileName files |> async.Return
 
     let projectOptions =
@@ -273,8 +273,8 @@ let testToolTipSquashing source =
 
     let checkResult =
         checker.ParseAndCheckFileInProject("A.fs", 0, Map.find "A.fs" files, projectOptions)
-        |> Async.RunImmediate
-        
+        |> Async.RunSynchronouslyImmediate
+
     match checkResult with
     | _, FSharpCheckFileAnswer.Succeeded(checkResults) ->
         // Get the tooltip for `bar`
@@ -291,8 +291,7 @@ let testToolTipSquashing source =
                                 | ToolTipElement.Group gr -> gr |> List.map (fun g -> g.MainDescription)
                                 | _ -> failwith "expected TooltipElement.Group")
                 |> List.concat
-                |> Array.concat
-                |> Array.sumBy (fun t -> if t.Tag = TextTag.LineBreak then 1 else 0)
+                |> List.sumBy (fun t -> t.Parts |> Array.sumBy (fun t -> if t.Tag = TextTag.LineBreak then 1 else 0))
             let squashedBreaks =
                 groupsSquashed
                 |> List.map
@@ -301,9 +300,8 @@ let testToolTipSquashing source =
                                 | ToolTipElement.Group gr -> gr |> List.map (fun g -> g.MainDescription)
                                 | _ -> failwith "expected TooltipElement.Group")
                 |> List.concat
-                |> Array.concat
-                |> Array.sumBy (fun t -> if t.Tag = TextTag.LineBreak then 1 else 0)
-                    
+                |> List.sumBy (fun t -> t.Parts |> Array.sumBy (fun t -> if t.Tag = TextTag.LineBreak then 1 else 0))
+
             Assert.True(breaks < squashedBreaks)
     | _ -> failwith "Expected checking to succeed."
 
@@ -380,7 +378,7 @@ let getMainDescriptionTags (ToolTipText(items)) =
     | _ -> failwith $"Expected single group in tooltip, got {items}"
 
 let assertNameTagInTooltip expectedTag expectedName (tooltip: ToolTipText) =
-    let tags = getMainDescriptionTags tooltip
+    let tags = (getMainDescriptionTags tooltip).Parts
     let found = tags |> Array.exists (fun t -> t.Tag = expectedTag && t.Text = expectedName)
     let desc = tags |> Array.map (fun t -> sprintf "(%A, %s)" t.Tag t.Text) |> String.concat ", "
     Assert.True(found, sprintf "Expected tag %A with text '%s' in tooltip, but found: %s" expectedTag expectedName desc)
@@ -425,7 +423,7 @@ let exists() = System.IO.Path.Exist{caret}s(null:string)
 """
     |> assertAndGetSingleToolTipText
     |> Assert.shouldBeEquivalentTo "System.IO.Path.Exists([<NotNullWhenAttribute (true)>] path: string | null) : bool"
-    
+
 [<FactForNETCOREAPP>]
 let ``Should display xml doc on a nullable BLC method`` () =
     Checker.getTooltipWithOptions [|"--checknulls+";"--langversion:preview"|] """
@@ -440,7 +438,7 @@ let exists() = System.IO.Path.Exi{caret}sts(null:string)
             | FSharpXmlDoc.FromXmlFile (_dll,sigPath) -> sigPath |> Assert.shouldBeEquivalentTo "M:System.IO.Path.Exists(System.String)"
             | _ -> failwith $"Xml wrong type %A{xml}"
 
-            
+
 [<FactForNETCOREAPP>]
 let ``Should display xml doc on fsharp hosted nullable function`` () =
     Checker.getTooltipWithOptions [|"--checknulls+";"--langversion:preview"|] """
@@ -457,7 +455,7 @@ let exists() = myFu{caret}nc(null)
             | FSharpXmlDoc.FromXmlText t ->
                  t.UnprocessedLines |> Assert.shouldBeEquivalentTo [|" This is a xml doc above myFunc"|]
             | _ -> failwith $"xml was %A{xml}"
-            text |> Assert.shouldBeEquivalentTo "val myFunc: x: (string | null) -> string | null"            
+            text |> Assert.shouldBeEquivalentTo "val myFunc: x: (string | null) -> string | null"
             remarks |> Assert.shouldBeEquivalentTo (Some "Full name: Foo.myFunc")
 
 
@@ -473,7 +471,7 @@ let getPath() = System.IO.Path.GetFile{caret}Name(null:string)
 System.IO.Path.GetFileName(path: string | null) : string | null""" |> normalize)
 
 [<FactForNETCOREAPP>]
-let ``Should display nullable Csharp code analysis annotations on TryParse pattern`` () =   
+let ``Should display nullable Csharp code analysis annotations on TryParse pattern`` () =
     Checker.getTooltipWithOptions [|"--checknulls+";"--langversion:preview"|] """
 module Foo
 
@@ -483,7 +481,7 @@ let success,version = System.Version.TryPar{caret}se(null)
     |> Assert.shouldBeEquivalentTo """System.Version.TryParse([<NotNullWhenAttribute (true)>] input: string | null, [<NotNullWhenAttribute (true)>] result: byref<System.Version | null>) : bool"""
 
 [<FactForNETCOREAPP>]
-let ``Display with nullable annotations can be squashed`` () =   
+let ``Display with nullable annotations can be squashed`` () =
     Checker.getTooltipWithOptions [|"--checknulls+";"--langversion:preview"|] """
 module Foo
 
@@ -491,9 +489,9 @@ let success,version = System.Version.Try{caret}Parse(null)
 """
     |> assertAndGetSingleToolTipText
     |> Assert.shouldBeEquivalentTo ("""System.Version.TryParse([<NotNullWhenAttribute (true)>] input: string | null, [<NotNullWhenAttribute (true)>] result: byref<System.Version | null>) : bool""" |> normalize)
-    
+
 [<FactForNETCOREAPP>]
-let ``Allows ref struct is shown on BCL interface declaration`` () =   
+let ``Allows ref struct is shown on BCL interface declaration`` () =
     Checker.getTooltipWithOptions [|"--checknulls+";"--langversion:preview"|] """
 module Foo
 
@@ -502,9 +500,9 @@ let myAction : Acti{caret}on<int> | null = null
 """
     |> assertAndGetSingleToolTipText
     |> Assert.shouldStartWith ("""type Action<'T (allows ref struct)>""" |> normalize)
-    
+
 [<FactForNETCOREAPP>]
-let ``Allows ref struct is shown for each T on BCL interface declaration`` () =   
+let ``Allows ref struct is shown for each T on BCL interface declaration`` () =
     Checker.getTooltipWithOptions [|"--checknulls+";"--langversion:preview"|] """
 module Foo
 
@@ -513,7 +511,7 @@ let myAction : Acti{caret}on<int,_,_,_> | null = null
 """
     |> assertAndGetSingleToolTipText
     |> Assert.shouldStartWith ("""type Action<'T1,'T2,'T3,'T4 (allows ref struct and allows ref struct and allows ref struct and allows ref struct)>""" |> normalize)
-    
+
 [<FactForNETCOREAPP>]
 let ``Allows ref struct is shown on BCL method usage`` () =
     Checker.getTooltip """
@@ -525,9 +523,9 @@ let doIt (dict:Dictionary<'a,'b>) = dict.GetAltern{caret}ateLookup<'a,'b,ReadOnl
 """
     |> assertAndGetSingleToolTipText
     |> Assert.shouldContain ("""'TAlternateKey (allows ref struct)""" |> normalize)
-    
+
 [<FactForNETCOREAPP>]
-let ``Allows ref struct is not shown on BCL interface usage`` () =   
+let ``Allows ref struct is not shown on BCL interface usage`` () =
     Checker.getTooltip """
 module Foo
 
@@ -893,8 +891,7 @@ let private renderAllGroups (ToolTipText elements) =
         match el with
         | ToolTipElement.Group items ->
             for item in items do
-                for line in item.MainDescription do
-                    sb.Append(line.Text) |> ignore
+                sb.Append(item.MainDescription.Text) |> ignore
                 sb.Append('\n') |> ignore
                 for line in item.XmlDoc |> (function FSharpXmlDoc.FromXmlText t -> t.UnprocessedLines |> Array.toList | _ -> []) do
                     sb.AppendLine(line) |> ignore

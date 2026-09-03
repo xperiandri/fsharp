@@ -337,7 +337,7 @@ type SyntheticProject =
                     SourceText.ofString referenceScript,
                     assumeDotNetFramework = false
                 )
-                |> Async.RunImmediate
+                |> Async.RunSynchronouslyImmediate
 
             {
                 ProjectFileName = this.ProjectFileName
@@ -365,7 +365,7 @@ type SyntheticProject =
                 UnresolvedReferences = None
                 OriginalLoadReferences = []
                 Stamp = None }
-       
+
         OptionsCache.GetOrAdd(key, factory).Value
 
 

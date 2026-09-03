@@ -220,8 +220,8 @@ let TryFindRelevantImplicitConversion (infoReader: InfoReader) ad reqdTy actualT
                 Some (minfo, staticTy, (reqdTy, reqdTy2, ignore))
             | (minfo, staticTy) :: _ -> 
                 Some (minfo, staticTy, (reqdTy, reqdTy2, fun denv -> 
-                         let reqdTy2Text, actualTyText, _cxs = NicePrint.minimalStringsOfTwoTypes denv reqdTy2 actualTy
-                         let implicitsText = NicePrint.multiLineStringOfMethInfos infoReader m denv (List.map fst implicits)
+                         let reqdTy2Text, actualTyText, _cxs = NicePrint.minimalRichTextsOfTwoTypes denv reqdTy2 actualTy
+                         let implicitsText = NicePrint.multiLineRichTextOfMethInfos infoReader m denv (List.map fst implicits)
                          errorR(Error(FSComp.SR.tcAmbiguousImplicitConversion(actualTyText, reqdTy2Text, implicitsText), m))))
             | _ -> None
         else
@@ -260,12 +260,12 @@ let rec AdjustRequiredTypeForTypeDirectedConversions (infoReader: InfoReader) ad
     let g = infoReader.g
 
     let warn info denv =
-        let reqdTyText, actualTyText, _cxs = NicePrint.minimalStringsOfTwoTypes denv reqdTy actualTy
+        let reqdTyText, actualTyText, _cxs = NicePrint.minimalRichTextsOfTwoTypes denv reqdTy actualTy
         match info with
         | TypeDirectedConversion.BuiltIn ->
             Error(FSComp.SR.tcBuiltInImplicitConversionUsed(actualTyText, reqdTyText), m)
         | TypeDirectedConversion.Implicit convMeth ->
-            let methText = NicePrint.stringOfMethInfo infoReader m denv convMeth
+            let methText = NicePrint.richTextOfMethInfo infoReader m denv convMeth
             if isMethodArg then
                 Error(FSComp.SR.tcImplicitConversionUsedForMethodArg(methText, actualTyText, reqdTyText), m)
             else
@@ -296,7 +296,7 @@ let rec AdjustRequiredTypeForTypeDirectedConversions (infoReader: InfoReader) ad
     elif g.langVersion.SupportsFeature LanguageFeature.AdditionalTypeDirectedConversions && typeEquiv g g.float_ty reqdTy && typeEquiv g g.int32_ty actualTy then 
         g.int32_ty, TypeDirectedConversionUsed.Yes(warn TypeDirectedConversion.BuiltIn, false, false), None
 
-    elif g.langVersion.SupportsFeature LanguageFeature.NullableOptionalInterop && isMethodArg && isNullableTy g reqdTy && not (isNullableTy g actualTy) then 
+    elif isMethodArg && isNullableTy g reqdTy && not (isNullableTy g actualTy) then 
         let underlyingTy = destNullableTy g reqdTy
         // shortcut
         if typeEquiv g underlyingTy actualTy then
@@ -365,17 +365,13 @@ let AdjustCalledArgTypeForOptionals (infoReader: InfoReader) ad enforceNullableO
         match calledArg.OptArgInfo with
         // CSharpMethod(?x = arg), optional C#-style argument, may have nullable type
         | CallerSide _ ->
-            if g.langVersion.SupportsFeature LanguageFeature.NullableOptionalInterop then
+            let calledArgTy =
+                if isNullableTy g calledArgTy then
+                    destNullableTy g calledArgTy
+                else
+                    calledArgTy
 
-                let calledArgTy =
-                    if isNullableTy g calledArgTy then
-                        destNullableTy g calledArgTy
-                    else
-                        calledArgTy
-
-                mkOptionalTy g calledArgTy, TypeDirectedConversionUsed.No, None
-            else
-                calledArgTy, TypeDirectedConversionUsed.No, None
+            mkOptionalTy g calledArgTy, TypeDirectedConversionUsed.No, None
 
         // FSharpMethod(?x = arg), optional F#-style argument
         | CalleeSide ->
@@ -387,15 +383,11 @@ let AdjustCalledArgTypeForOptionals (infoReader: InfoReader) ad enforceNullableO
             AdjustCalledArgTypeForTypeDirectedConversionsAndAutoQuote infoReader ad callerArgTy calledArgTy calledArg m
     else
         match calledArg.OptArgInfo with 
-        // CSharpMethod(x = arg), non-optional C#-style argument, may have type Nullable<ty>. 
-        | NotOptional when not (g.langVersion.SupportsFeature LanguageFeature.NullableOptionalInterop) ->
-            AdjustCalledArgTypeForTypeDirectedConversionsAndAutoQuote infoReader ad callerArgTy calledArgTy calledArg m
-
         // The arg should have type ty. However for backwards compat, we also allow arg to have type Nullable<ty>
         | NotOptional 
         // CSharpMethod(x = arg), optional C#-style argument, may have type Nullable<ty>. 
         | CallerSide _ ->
-            if isNullableTy g calledArgTy && g.langVersion.SupportsFeature LanguageFeature.NullableOptionalInterop then 
+            if isNullableTy g calledArgTy then 
                 // If inference has worked out it's a nullable then use this
                 if isNullableTy g callerArgTy then
                     calledArgTy, TypeDirectedConversionUsed.No, None
@@ -720,7 +712,7 @@ type CalledMeth<'T>
             let names = System.Collections.Generic.HashSet<_>() 
             for CallerNamedArg(nm, _) in namedCallerArgs do 
                 if not (names.Add nm.idText) then
-                    errorR(Error(FSComp.SR.typrelNamedArgumentHasBeenAssignedMoreThenOnce nm.idText, m))
+                    errorR(Error(FSComp.SR.typrelNamedArgumentHasBeenAssignedMoreThenOnce (RichText.mkParameter nm.idText), m))
                 
             let argSet = { UnnamedCalledArgs=unnamedCalledArgs; UnnamedCallerArgs=unnamedCallerArgs; ParamArrayCalledArgOpt=paramArrayCalledArgOpt; ParamArrayCallerArgs=paramArrayCallerArgs; AssignedNamedArgs=assignedNamedArgs }
 
@@ -1025,7 +1017,7 @@ let TakeObjAddrForMethodCall g amap (minfo: MethInfo) isMutable m staticTyOpt ob
                 minfo.TryObjArgByrefType(amap, m, minfo.FormalMethodInst)
                 |> Option.iter (fun ty ->
                     if not (isInByrefTy g ty) then
-                        errorR(Error(FSComp.SR.tcCannotCallExtensionMethodInrefToByref(minfo.DisplayName), m)))
+                        errorR(Error(FSComp.SR.tcCannotCallExtensionMethodInrefToByref(RichText.mkMethod minfo.DisplayName), m)))
                         
 
             wrap, [objArgExprCoerced] 
@@ -1037,7 +1029,14 @@ let TakeObjAddrForMethodCall g amap (minfo: MethInfo) isMutable m staticTyOpt ob
 
 /// Build an expression node that is a call to a .NET method. 
 let BuildILMethInfoCall g amap m isProp (minfo: ILMethInfo) valUseFlags minst direct args = 
-    let isStruct = isStructTy g minfo.ApparentEnclosingType
+    // For C#-style extension methods, the declaring type is the static helper class
+    // (a reference type), not the apparent/extended type. Use the declaring type for
+    // isStruct to avoid emitting value-type boxity for a reference-type method spec.
+    let isStruct =
+        if minfo.IsILExtensionMethod then
+            false
+        else
+            isStructTy g minfo.ApparentEnclosingType
     let ctor = minfo.IsConstructor
     if minfo.IsClassConstructor then 
         error (InternalError (minfo.ILName+": cannot call a class constructor", m))
@@ -1089,7 +1088,22 @@ let BuildFSharpMethodCall g m (ty, vref: ValRef) valUseFlags minst args =
     let vExpr = Expr.Val (vref, valUseFlags, m)
     let vExprTy = vref.Type
     let tpsorig, tau =  vref.GeneralizedType
-    let vtinst = argsOfAppTy g ty @ minst
+    let vtinst =
+        if vref.IsExtensionMember then
+            // For extension members, FormalMethodTypars includes the enclosing type's
+            // type parameters (AnalyzeTypeOfMemberVal treats all typars as method typars).
+            // The minst from the trait solution contains fresh type variables for all of them,
+            // but the enclosing type's type parameters may not be solved through trait matching
+            // (the trait solver constrains method-level typars, not enclosing-type typars).
+            // Use argsOfAppTy to get the concrete enclosing type args, then append
+            // the remaining method-specific type args from minst.
+            let parentTyArgs = argsOfAppTy g ty
+            if List.length minst < parentTyArgs.Length then
+                error(InternalError("BuildFSharpMethodCall: minst shorter than enclosing type args for extension member", m))
+            else
+                parentTyArgs @ List.skip parentTyArgs.Length minst
+        else
+            argsOfAppTy g ty @ minst
     if tpsorig.Length <> vtinst.Length then error(InternalError("BuildFSharpMethodCall: unexpected List.length mismatch", m))
     let expr = mkTyAppExpr m (vExpr, vExprTy) vtinst
     let exprTy = instType (mkTyparInst tpsorig vtinst) tau
@@ -1120,8 +1134,13 @@ let rec MakeMethInfoCall (amap: ImportMap) m (minfo: MethInfo) minst args static
 
     | MethInfoWithModifiedReturnType(mi,_) -> MakeMethInfoCall amap m mi minst args staticTyOpt
 
-    | DefaultStructCtor(_, ty) -> 
+    | DefaultStructCtor(_, ty) ->
        mkDefault (m, ty)
+
+    | RecdCtor(g, ty) ->
+        let tcref = tcrefOfAppTy g ty
+        let tinst = argsOfAppTy g ty
+        mkRecordExpr g (RecdExpr, tcref, tinst, tcref.TrueInstanceFieldsAsRefList, args, m)
 
 #if !NO_TYPEPROVIDERS
     | ProvidedMeth(amap, mi, _, m) -> 
@@ -1197,7 +1216,7 @@ let rec BuildMethodCall tcVal g amap isMutable m isProp minfo valUseFlags minst 
             // prohibit calls to methods that are declared in specific array types (Get, Set, Address)
             // these calls are provided by the runtime and should not be called from the user code
             if isArrayTy g enclTy then
-                let tpe = TypeProviderError(FSComp.SR.tcRuntimeSuppliedMethodCannotBeUsedInUserCode(minfo.DisplayName), providedMeth.TypeProviderDesignation, m)
+                let tpe = TypeProviderError(FSComp.SR.tcRuntimeSuppliedMethodCannotBeUsedInUserCode(RichText.mkMethod minfo.DisplayName), providedMeth.TypeProviderDesignation, m)
                 error tpe
             let isStruct = isStructTy g enclTy
             let isCtor = minfo.IsConstructor
@@ -1272,13 +1291,19 @@ let rec BuildMethodCall tcVal g amap isMutable m isProp minfo valUseFlags minst 
                     else
                         warning(Error(FSComp.SR.tcDefaultStructConstructorCall(), m))
             else
-                if not (TypeHasDefaultValue g m ty) then 
+                if not (TypeHasDefaultValue g m ty) then
                     errorR(Error(FSComp.SR.tcDefaultStructConstructorCall(), m))
-            mkDefault (m, ty), ty)
+            mkDefault (m, ty), ty
+
+        // Lower the record constructor call to a plain record allocation.
+        | RecdCtor (g, ty) ->
+            let tcref = tcrefOfAppTy g ty
+            let tinst = argsOfAppTy g ty
+            mkRecordExpr g (RecdExpr, tcref, tinst, tcref.TrueInstanceFieldsAsRefList, allArgs, m), ty)
 
 let ILFieldStaticChecks g amap infoReader ad m (finfo : ILFieldInfo) =
     CheckILFieldInfoAccessible g amap m ad finfo
-    if not finfo.IsStatic then error (Error (FSComp.SR.tcFieldIsNotStatic(finfo.FieldName), m))
+    if not finfo.IsStatic then error (Error(FSComp.SR.tcFieldIsNotStatic(RichText.mkField finfo.FieldName), m))
 
     // Static IL interfaces fields are not supported in lower F# versions.
     if isInterfaceTy g finfo.ApparentEnclosingType then    
@@ -1295,9 +1320,9 @@ let ILFieldInstanceChecks  g amap ad m (finfo : ILFieldInfo) =
 let MethInfoChecks g amap isInstance tyargsOpt objArgs ad m (minfo: MethInfo)  =
     if minfo.IsInstance <> isInstance then
       if isInstance then 
-        error (Error (FSComp.SR.csMethodIsNotAnInstanceMethod(minfo.LogicalName), m))
+        error (Error(FSComp.SR.csMethodIsNotAnInstanceMethod(RichText.mkMethod minfo.LogicalName), m))
       else        
-        error (Error (FSComp.SR.csMethodIsNotAStaticMethod(minfo.LogicalName), m))
+        error (Error(FSComp.SR.csMethodIsNotAStaticMethod(RichText.mkMethod minfo.LogicalName), m))
 
     // keep the original accessibility domain to determine type accessibility
     let adOriginal = ad
@@ -1318,7 +1343,7 @@ let MethInfoChecks g amap isInstance tyargsOpt objArgs ad m (minfo: MethInfo)  =
         | _ -> ad
 
     if not (minfo.IsProtectedAccessibility && minfo.LogicalName.StartsWithOrdinal("set_")) && not(IsTypeAndMethInfoAccessible amap m adOriginal ad minfo) then 
-      error (Error (FSComp.SR.tcMethodNotAccessible(minfo.LogicalName), m))
+      error (Error(FSComp.SR.tcMethodNotAccessible(RichText.mkMethod minfo.LogicalName), m))
 
     if isAnyTupleTy g minfo.ApparentEnclosingType && not minfo.IsExtensionMember &&
         (minfo.LogicalName.StartsWithOrdinal("get_Item") || minfo.LogicalName.StartsWithOrdinal("get_Rest")) then
@@ -1355,9 +1380,9 @@ let BuildNewDelegateExpr (eventInfoOpt: EventInfo option, g, amap, delegateTy, d
             if List.exists (isByrefTy g) delArgTys then
                     error(Error(FSComp.SR.tcFunctionRequiresExplicitLambda(delArgTys.Length), m)) 
 
-            let delFuncArgNamesIfFeatureEnabled =
+            let delFuncArgNames =
                 match delFuncExpr with
-                | Expr.Val (valRef = vref) when g.langVersion.SupportsFeature LanguageFeature.ImprovedImpliedArgumentNames ->
+                | Expr.Val (valRef = vref) ->
                     match vref.ValReprInfo with
                     | Some repr when repr.ArgNames.Length = delArgTys.Length -> Some repr.ArgNames
                     | _ -> None
@@ -1373,7 +1398,7 @@ let BuildNewDelegateExpr (eventInfoOpt: EventInfo option, g, amap, delegateTy, d
                 delArgTys
                 |> List.mapi (fun i argTy ->
                     let argName =
-                        match delFuncArgNamesIfFeatureEnabled with
+                        match delFuncArgNames with
                         | Some argNames -> argNames[i]
                         | None ->
                             match List.tryItem i delInvokeArgNamesIfFeatureEnabled with
@@ -1437,8 +1462,7 @@ let rec AdjustExprForTypeDirectedConversions tcVal (g: TcGlobals) amap infoReade
 
        mkCallToDoubleOperator g m actualTy expr
 
-   elif g.langVersion.SupportsFeature LanguageFeature.NullableOptionalInterop &&
-        isNullableTy g reqdTy && not (isNullableTy g actualTy) then
+   elif isNullableTy g reqdTy && not (isNullableTy g actualTy) then
 
        let underlyingTy = destNullableTy g reqdTy
        let adjustedExpr = AdjustExprForTypeDirectedConversions tcVal g amap infoReader ad underlyingTy actualTy m expr
@@ -1594,10 +1618,6 @@ let AdjustCallerArgForOptional tcVal tcFieldInit eCallerMemberName (infoReader: 
     let reflArgInfo = calledArg.ReflArgInfo
     let calledArgTy = calledArg.CalledArgumentType
     match calledArg.OptArgInfo with
-    | NotOptional when not (g.langVersion.SupportsFeature LanguageFeature.NullableOptionalInterop) ->
-        if isOptCallerArg then errorR(Error(FSComp.SR.tcFormalArgumentIsNotOptional(), m))
-        assignedArg
-
     // For non-nullable, non-optional arguments no conversion is needed.
     // We return precisely the assignedArg.  This also covers the case where there
     // can be a lingering permitted type mismatch between caller argument and called argument, 
@@ -1757,7 +1777,7 @@ let AdjustCallerArgs tcVal tcFieldInit eCallerMemberName (infoReader: InfoReader
         match objArgs, lambdaVars with 
         | [objArg], Some _ -> 
             if calledMethInfo.IsExtensionMember && calledMethInfo.ObjArgNeedsAddress(amap, mMethExpr) then
-                error(Error(FSComp.SR.tcCannotPartiallyApplyExtensionMethodForByref(calledMethInfo.DisplayName), mMethExpr))
+                error(Error(FSComp.SR.tcCannotPartiallyApplyExtensionMethodForByref(RichText.mkMethod calledMethInfo.DisplayName), mMethExpr))
             let objArgTy = tyOfExpr g objArg
             let v, ve = mkCompGenLocal mMethExpr "objectArg" objArgTy
             (fun body -> mkCompGenLet mMethExpr v objArg body), [ve]
@@ -1824,7 +1844,7 @@ module ProvidedMethodCalls =
         let ty = ImportProvidedType amap m objTy
         let normTy = normalizeEnumTy g ty
         obj.PUntaint((fun v ->
-            let fail() = raise (TypeProviderError(FSComp.SR.etUnsupportedConstantType(v.GetType().ToString()), constant.TypeProviderDesignation, m))
+            let fail() = raise (TypeProviderError(FSComp.SR.etUnsupportedConstantType(RichText.mkText (v.GetType().ToString())), constant.TypeProviderDesignation, m))
             try 
                 if isNull v then mkNull m ty else
                 let c = 
@@ -1924,9 +1944,9 @@ module ProvidedMethodCalls =
             dict
 
         let rec exprToExprAndWitness top (ea: Tainted<(ProvidedExpr | null)>) =
-            let fail() = error(Error(FSComp.SR.etUnsupportedProvidedExpression(ea.PUntaint((fun etree -> match etree with null -> "<null>" | e -> e.UnderlyingExpressionString), m)), m))
+            let fail() = error(Error(FSComp.SR.etUnsupportedProvidedExpression(RichText.mkText (ea.PUntaint((fun etree -> match etree with null -> "<null>" | e -> e.UnderlyingExpressionString), m))), m))
             match ea with
-            | Tainted.Null -> error(Error(FSComp.SR.etNullProvidedExpression(ea.TypeProviderDesignation), m))
+            | Tainted.Null -> error(Error(FSComp.SR.etNullProvidedExpression(RichText.mkText ea.TypeProviderDesignation), m))
             | Tainted.NonNull ea ->
             let exprType = ea.PApplyOption((fun x -> x.GetExprType()), m)
             let exprType = match exprType with | Some exprType -> exprType | None -> fail()
@@ -2117,7 +2137,7 @@ module ProvidedMethodCalls =
             | true, v -> v
             | _ ->
                 let typeProviderDesignation = DisplayNameOfTypeProvider (pe.TypeProvider, m)
-                error(Error(FSComp.SR.etIncorrectParameterExpression(typeProviderDesignation, vRaw.Name), m))
+                error(Error(FSComp.SR.etIncorrectParameterExpression(RichText.mkText typeProviderDesignation, RichText.mkParameter vRaw.Name), m))
                 
         and exprToExpr expr =
             let _, (resExpr, _) = exprToExprAndWitness false expr
@@ -2205,14 +2225,56 @@ let GenWitnessExpr amap g m (traitInfo: TraitConstraintInfo) argExprs =
             match sln with 
             | ILMethSln(origTy, extOpt, mref, minst, staticTyOpt) ->
                 let metadataTy = convertToTypeWithMetadataIfPossible g origTy
-                let tcref = tcrefOfAppTy g metadataTy
-                let mdef = resolveILMethodRef tcref.ILTyconRawMetadata mref
+                // ILMethSln minst: strip typar indirections. For C#-style extensions,
+                // unsolved typars from 'this' param (dropped by GetParamTypes) are
+                // resolved via origTy and IL first-param type variable analysis.
+                let minst =
+                    let hasUnsolved = minst |> List.exists (fun ty -> match stripTyEqnsAndMeasureEqns g ty with TType_var(tp, _) -> not tp.IsSolved | _ -> false)
+                    if hasUnsolved && extOpt.IsSome then
+                        // Unsolved typars arise when GetParamTypes drops the 'this' parameter
+                        // for C#-style extensions, preventing CanMemberSigsMatchUpToCheck from
+                        // constraining method type parameters that appear only in the 'this'
+                        // parameter (e.g., T in Stringify<T>(this T value)).
+                        //
+                        // Only substitute typars that actually appear in the method's first
+                        // parameter (the 'this' parameter in IL). Typars in other parameters
+                        // should already be solved; if not, leave them as-is.
+                        let thisParamTyVarIndices =
+                            match mref.ArgTypes with
+                            | firstArgTy :: _ ->
+                                // Collect type variable indices used in the 'this' parameter type.
+                                // IL type variables are referenced by index (!!0, !!1, etc.)
+                                let rec collectTyVarIndices acc ilTy =
+                                    match ilTy with
+                                    | ILType.TypeVar idx -> Set.add (int idx) acc
+                                    | ILType.Array(_, elTy) -> collectTyVarIndices acc elTy
+                                    | ILType.Boxed tspec | ILType.Value tspec ->
+                                        tspec.GenericArgs |> List.fold collectTyVarIndices acc
+                                    | ILType.Byref innerTy | ILType.Ptr innerTy ->
+                                        collectTyVarIndices acc innerTy
+                                    | _ -> acc
+                                collectTyVarIndices Set.empty firstArgTy
+                            | [] -> Set.empty
+                        minst |> List.mapi (fun i ty ->
+                            match stripTyEqnsAndMeasureEqns g ty with
+                            | TType_var(tp, _) when not tp.IsSolved && Set.contains i thisParamTyVarIndices ->
+                                origTy
+                            | other -> other)
+                    else
+                        minst |> List.map (stripTyEqnsAndMeasureEqns g)
                 let ilMethInfo =
-                    match extOpt with 
-                    | None -> MethInfo.CreateILMeth(amap, m, origTy, mdef)
-                    | Some ilActualTypeRef -> 
-                        let actualTyconRef = ImportILTypeRef amap m ilActualTypeRef 
-                        MethInfo.CreateILExtensionMeth(amap, m, origTy, actualTyconRef, None, mdef)
+                    match extOpt with
+                    | None ->
+                        let tcref = tcrefOfAppTy g metadataTy
+                        let mdef = resolveILMethodRef tcref.ILTyconRawMetadata mref
+                        MethInfo.CreateILMeth(amap, m, origTy, mdef)
+                    | Some ilActualTypeRef ->
+                        // For C#-style extension methods, the method lives in a static helper
+                        // class (ilActualTypeRef), not on the apparent/extended type (origTy).
+                        // Resolve the method reference against the declaring type's metadata.
+                        let actualTyconRef = ImportILTypeRef amap m ilActualTypeRef
+                        let mdef = resolveILMethodRef actualTyconRef.ILTyconRawMetadata mref
+                        MethInfo.CreateILExtensionMeth(amap, m, origTy, actualTyconRef, Some 0UL, mdef)
                 Choice1Of5 (ilMethInfo, minst, staticTyOpt)
 
             | FSMethSln(ty, vref, minst, staticTyOpt) ->
@@ -2252,6 +2314,24 @@ let GenWitnessExpr amap g m (traitInfo: TraitConstraintInfo) argExprs =
                     | argExprs -> None, argExprs
                 else None, argExprs
 
+            // C#-style extensions: strip address-taking from receiver (static IL call expects by-value arg)
+            let receiverArgOpt =
+                if not minfo.IsCSharpStyleExtensionMember then receiverArgOpt
+                else
+                    match receiverArgOpt with
+                    | Some (Expr.Op(TOp.LValueOp(LAddrOf _, vref), _, [], m2)) ->
+                        Some (Expr.Val(vref, NormalValUse, m2))
+                    | Some (Expr.Let(TBind(tmp, innerExpr, _), Expr.Op(TOp.LValueOp(LAddrOf _, vref2), _, [], _), _, _))
+                        when valRefEq g (mkLocalValRef tmp) vref2 ->
+                        Some innerExpr
+                    | Some receiver when isByrefTy g (tyOfExpr g receiver) ->
+                        // General fallback for other byref forms: bind the byref to a
+                        // compiler-generated local, then dereference via LByrefGet to
+                        // convert byref<T> → T for the static extension method call.
+                        let tmp, _ = mkCompGenLocal m "csExtReceiver" (tyOfExpr g receiver)
+                        Some (mkCompGenLet m tmp receiver (mkAddrGet m (mkLocalValRef tmp)))
+                    | _ -> receiverArgOpt
+
             // For methods taking no arguments, 'argExprs' will be a single unit expression here
             let argExprs = 
                  match argTypes, argExprs with
@@ -2265,7 +2345,10 @@ let GenWitnessExpr amap g m (traitInfo: TraitConstraintInfo) argExprs =
 
         // Fix bug 1281 / issue #8098: If the receiver needs its address taken for a
         // constrained call, go do that and re-resolve via TraitCall with the byref receiver.
+        // Skip for all extension members (C#- and F#-style): they are static in IL and take
+        // the receiver by value, so address-taking would push a byref where a value is expected.
         let needsAddrTaken =
+            not minfo.IsExtensionMember &&
             minfo.IsInstance &&
             (minfo.IsStruct || (ComputeConstrainedCallInfo g amap m staticTyOpt argExprs minfo).IsSome)
 

@@ -457,7 +457,14 @@ module internal ExprFolding =
                              not (c.FieldByIndex n).IsMutable
                              && not (entityRefInThisAssembly g.compilingFSharpCore tcref)
                          then
-                             errorR (Error(FSComp.SR.tastRecursiveValuesMayNotAppearInConstructionOfType (tcref.LogicalName), m))
+                             errorR (
+                                 Error(
+                                     FSComp.SR.tastRecursiveValuesMayNotAppearInConstructionOfType (
+                                         richTextOfEntityRefName tcref tcref.LogicalName
+                                     ),
+                                     m
+                                 )
+                             )
 
                          mkUnionCaseFieldSet (access, c, tinst, n, e, m))))
 
@@ -477,8 +484,8 @@ module internal ExprFolding =
                              errorR (
                                  Error(
                                      FSComp.SR.tastRecursiveValuesMayNotBeAssignedToNonMutableField (
-                                         fspec.rfield_id.idText,
-                                         tcref.LogicalName
+                                         RichText.mkField fspec.rfield_id.idText,
+                                         richTextOfEntityRefName tcref tcref.LogicalName
                                      ),
                                      m
                                  )
@@ -548,8 +555,7 @@ module internal ExprFolding =
         let rec exprsF z xs = List.fold exprFClosure z xs
 
         and exprF (z: 'State) (x: Expr) =
-            stackGuard.Guard
-            <| fun () -> folders.exprIntercept exprFClosure exprNoInterceptFClosure z x
+            stackGuard.Guard(fun () -> folders.exprIntercept exprFClosure exprNoInterceptFClosure z x)
 
         and exprNoInterceptF (z: 'State) (x: Expr) =
             match x with

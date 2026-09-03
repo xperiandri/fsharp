@@ -163,6 +163,8 @@ module internal ILExtensions =
                 | "System.Runtime.CompilerServices.CompilerFeatureRequiredAttribute" ->
                     WellKnownILAttributes.CompilerFeatureRequiredAttribute
                 | "System.Runtime.CompilerServices.RequiredMemberAttribute" -> WellKnownILAttributes.RequiredMemberAttribute
+                | "System.Runtime.CompilerServices.OverloadResolutionPriorityAttribute" ->
+                    WellKnownILAttributes.OverloadResolutionPriorityAttribute
                 | _ -> WellKnownILAttributes.None
 
             elif name.StartsWith("Microsoft.FSharp.Core.") then
@@ -253,8 +255,8 @@ module internal AttributeHelpers =
                 struct (ValueSome nlr.Path, ValueNone)
         elif g.compilingFSharpCore then
             match tcref.Deref.PublicPath with
-            | Some(PubPath pp) -> struct (ValueNone, ValueSome pp)
-            | None -> struct (ValueNone, ValueNone)
+            | ValueSome pubpath -> struct (ValueNone, ValueSome pubpath.FullPath)
+            | ValueNone -> struct (ValueNone, ValueNone)
         else
             struct (ValueNone, ValueNone)
 
@@ -283,6 +285,7 @@ module internal AttributeHelpers =
             | [| "System"; "Runtime"; "InteropServices"; name |] ->
                 match name with
                 | "StructLayoutAttribute" -> WellKnownEntityAttributes.StructLayoutAttribute
+                | "ExtendedLayoutAttribute" -> WellKnownEntityAttributes.ExtendedLayoutAttribute
                 | "DllImportAttribute" -> WellKnownEntityAttributes.DllImportAttribute
                 | "ComVisibleAttribute" ->
                     decodeBoolAttribFlag
@@ -574,6 +577,7 @@ module internal AttributeHelpers =
                 | "CallerFilePathAttribute" -> WellKnownValAttributes.CallerFilePathAttribute
                 | "CallerLineNumberAttribute" -> WellKnownValAttributes.CallerLineNumberAttribute
                 | "MethodImplAttribute" -> WellKnownValAttributes.MethodImplAttribute
+                | "OverloadResolutionPriorityAttribute" -> WellKnownValAttributes.OverloadResolutionPriorityAttribute
                 | _ -> WellKnownValAttributes.None
 
             | [| "System"; "Runtime"; "InteropServices"; name |] ->
@@ -1674,7 +1678,7 @@ module internal DebugPrint =
 
     and auxTraitL env (ttrait: TraitConstraintInfo) =
 #if DEBUG
-        let (TTrait(tys, nm, memFlags, argTys, retTy, _, _)) = ttrait
+        let (TTrait(tys, nm, memFlags, argTys, retTy, _, _, _)) = ttrait
 
         match global_g with
         | None -> wordL (tagText "<no global g>")

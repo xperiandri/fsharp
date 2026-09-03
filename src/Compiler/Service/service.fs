@@ -11,6 +11,7 @@ open FSharp.Compiler.Caches
 open FSharp.Compiler.CodeAnalysis
 open FSharp.Compiler.CodeAnalysis.TransparentCompiler
 open FSharp.Compiler.CompilerConfig
+open FSharp.Compiler.CompilerImports
 open FSharp.Compiler.CompilerOptions
 open FSharp.Compiler.Diagnostics
 open FSharp.Compiler.Driver
@@ -97,6 +98,7 @@ type FSharpChecker
         enableBackgroundItemKeyStoreAndSemanticClassification,
         enablePartialTypeChecking,
         parallelReferenceResolution,
+        shareImportedAssemblies,
         captureIdentifiersWhenParsing,
         getSource,
         useChangeNotifications,
@@ -117,6 +119,7 @@ type FSharpChecker
                 enableBackgroundItemKeyStoreAndSemanticClassification,
                 enablePartialTypeChecking,
                 parallelReferenceResolution,
+                shareImportedAssemblies,
                 captureIdentifiersWhenParsing,
                 getSource,
                 useChangeNotifications,
@@ -135,6 +138,7 @@ type FSharpChecker
                 enableBackgroundItemKeyStoreAndSemanticClassification,
                 enablePartialTypeChecking,
                 parallelReferenceResolution,
+                shareImportedAssemblies,
                 captureIdentifiersWhenParsing,
                 getSource,
                 useChangeNotifications
@@ -181,6 +185,7 @@ type FSharpChecker
             ?enableBackgroundItemKeyStoreAndSemanticClassification,
             ?enablePartialTypeChecking,
             ?parallelReferenceResolution: bool,
+            ?shareImportedAssemblies: bool,
             ?captureIdentifiersWhenParsing: bool,
             ?documentSource: DocumentSource,
             ?useTransparentCompiler: bool,
@@ -215,6 +220,8 @@ type FSharpChecker
         if keepAssemblyContents && enablePartialTypeChecking then
             invalidArg "enablePartialTypeChecking" "'keepAssemblyContents' and 'enablePartialTypeChecking' cannot be both enabled."
 
+        let shareImportedAssemblies = defaultArg shareImportedAssemblies true
+
         let parallelReferenceResolution = inferParallelReferenceResolution parallelReferenceResolution
 
         FSharpChecker(
@@ -228,6 +235,7 @@ type FSharpChecker
             enableBackgroundItemKeyStoreAndSemanticClassification,
             enablePartialTypeChecking,
             parallelReferenceResolution,
+            shareImportedAssemblies,
             captureIdentifiersWhenParsing,
             (match documentSource with
              | Some(DocumentSource.Custom f) -> Some f
@@ -330,6 +338,7 @@ type FSharpChecker
         braceMatchCache.Clear(utok)
         backgroundCompiler.ClearCaches()
         ClearAllILModuleReaderCache()
+        SharedImportedCcus.clear ()
 
     member ic.ClearLanguageServiceRootCachesAndCollectAndFinalizeAllTransients() =
         use _ =
@@ -629,16 +638,22 @@ type FSharpChecker
     member _.TokenizeLine(line: string, state: FSharpTokenizerLexState) =
         let tokenizer = FSharpSourceTokenizer([], None, None)
         let lineTokenizer = tokenizer.CreateLineTokenizer line
-        let mutable state = (None, state)
+        let mutable lexState = state
+        let mutable token = ValueNone
+
+        let scanNext () =
+            let struct (t, s) = lineTokenizer.ScanToken(lexState)
+            token <- t
+            lexState <- s
+            token.IsSome
 
         let tokens =
             [|
-                while (state <- lineTokenizer.ScanToken(snd state)
-                       (fst state).IsSome) do
-                    yield (fst state).Value
+                while scanNext () do
+                    yield token.Value
             |]
 
-        tokens, snd state
+        tokens, lexState
 
     /// Tokenize an entire file, line by line
     member x.TokenizeFile(source: string) : FSharpTokenInfo[][] =
