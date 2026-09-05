@@ -96,7 +96,7 @@ type TextViewEventsHandler
 type ConnectionPointSubscription = System.IDisposable option
 
 // Usage example:
-//  If a handler is None, to not handle that event
+//  If a handler is ValueNone, to not handle that event
 //  let subscription = subscribeToTextViewEvents (textView, onChangeCaretHandler, onKillFocus, onSetFocus)
 //  Unsubscribe using subscription.Dispose()
 let subscribeToTextViewEvents (textView: IVsTextView, onChangeCaretHandler, onKillFocus, onSetFocus) : ConnectionPointSubscription =
