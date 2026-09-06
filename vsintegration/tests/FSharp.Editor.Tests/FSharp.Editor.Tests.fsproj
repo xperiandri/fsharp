@@ -48,6 +48,7 @@
     <Compile Include="CodeMap\FSharpCallStackPlanTests.fs" />
     <Compile Include="CodeMap\FSharpCallStackResolverTests.fs" />
     <Compile Include="CodeMap\FSharpCallStackSampleTests.fs" />
+    <Compile Include="CrossLanguageSymbolNavigationTests.fs" />
     <Compile Include="CodeFixes\CodeFixTestFramework.fs" />
     <Compile Include="ActivePatternEditorTests.fs" />
     <Compile Include="CodeFixes\AddInstanceMemberParameterTests.fs" />
