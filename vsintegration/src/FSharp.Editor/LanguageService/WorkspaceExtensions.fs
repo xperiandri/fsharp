@@ -18,7 +18,6 @@ open CancellableTasks
 open System.IO
 
 open Internal.Utilities.Collections
-open Internal.Utilities.Library
 open Newtonsoft.Json
 open Newtonsoft.Json.Linq
 open System.Text.Json.Nodes
@@ -242,7 +241,7 @@ module private CheckerExtensions =
     let getOnDiskReferences (stamps: IReferenceStamps) (options: FSharpProjectOptions) =
         [
             for option in options.OtherOptions do
-                if option.StartsWithOrdinal "-r:" then
+                if option.StartsWith("-r:", StringComparison.Ordinal) then
                     let path = option.Substring "-r:".Length
 
                     {
@@ -334,7 +333,6 @@ module private CheckerExtensions =
                         |> Some
 
                 | _ -> None
-
 
             let! newSnapshot =
                 match updatedSnapshot with
@@ -712,7 +710,6 @@ type Document with
     member inline this.FindFSharpReferencesAsync(symbol, projectSnapshot: FSharpProjectSnapshot, [<InlineIfLambda>] onFound, userOpName) =
         cancellableTask {
             let! checker, _, _, projectOptions = this.GetFSharpCompilationOptionsAsync(userOpName)
-
 
             let! symbolUses =
                 if this.Project.UseTransparentCompiler then
