@@ -29,6 +29,7 @@
     <Compile Include="FindReferencesTests.fs" />
     <Compile Include="FindReferencesFromCSharpTests.fs" />
     <Compile Include="GoToDefinitionServiceTests.fs" />
+    <Compile Include="PathMapNavigationTests.fs" />
     <Compile Include="HelpContextServiceTests.fs" />
     <Compile Include="QuickInfoTests.fs" />
     <Compile Include="TaskListServiceTests.fs" />
