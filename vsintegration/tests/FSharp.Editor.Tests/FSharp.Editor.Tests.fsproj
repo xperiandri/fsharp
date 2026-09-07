@@ -46,6 +46,7 @@
     <Compile Include="CodeMap\FSharpCallStackResolverTests.fs" />
     <Compile Include="CodeMap\FSharpCallStackSampleTests.fs" />
     <Compile Include="CrossLanguageSymbolNavigationTests.fs" />
+    <Compile Include="MultiTargetNavigateToSearchTests.fs" />
     <Compile Include="CodeFixes\CodeFixTestFramework.fs" />
     <Compile Include="CodeFixes\AddInstanceMemberParameterTests.fs" />
     <Compile Include="CodeFixes\ConvertToAnonymousRecordTests.fs" />
