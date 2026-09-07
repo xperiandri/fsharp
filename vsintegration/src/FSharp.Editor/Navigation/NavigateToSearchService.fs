@@ -18,6 +18,7 @@ open Microsoft.VisualStudio.LanguageServices
 open Microsoft.VisualStudio.Text.PatternMatching
 
 open FSharp.Compiler.EditorServices
+open FSharp.Compiler.Syntax
 open CancellableTasks
 
 /// Parse-tree navigable items per document, cached on the document's text version.
@@ -30,13 +31,23 @@ type internal FSharpNavigableItemsCache
     let cache =
         ConcurrentDictionary<DocumentId, struct (VersionStamp * NavigableItem array)>()
 
+    /// Whether the file's parse depends on the defines, by file path: known once any instance has parsed it.
+    let conditionalDirectives =
+        ConcurrentDictionary<string, bool>(StringComparer.OrdinalIgnoreCase)
+
     do
         match workspace with
         | null -> ()
         | workspace ->
             workspace.WorkspaceChanged.Add(fun e ->
                 if e.NewSolution.Id <> e.OldSolution.Id then
-                    cache.Clear())
+                    cache.Clear()
+                    conditionalDirectives.Clear())
+
+    let hasConditionalDirectives (parseTree: ParsedInput) =
+        match parseTree with
+        | ParsedInput.ImplFile file -> not file.Trivia.ConditionalDirectives.IsEmpty
+        | ParsedInput.SigFile file -> not file.Trivia.ConditionalDirectives.IsEmpty
 
     member _.GetNavigableItems(document: Document) =
         cancellableTask {
@@ -49,8 +60,20 @@ type internal FSharpNavigableItemsCache
                 let! parseResults = document.GetFSharpParseResultsAsync(nameof (FSharpNavigableItemsCache))
                 let items = NavigateTo.GetNavigableItems parseResults.ParseTree
                 cache[document.Id] <- struct (currentVersion, items)
+
+                match document.FilePath with
+                | null -> ()
+                | path -> conditionalDirectives[path] <- hasConditionalDirectives parseResults.ParseTree
+
                 return items
         }
+
+    /// Whether the file's parse tree, from whichever instance parsed it first, has `#if` directives.
+    /// `true` when unknown, so a file no instance has parsed yet is searched everywhere.
+    member _.HasConditionalDirectives(filePath: string) =
+        match conditionalDirectives.TryGetValue filePath with
+        | true, dependsOnDefines -> dependsOnDefines
+        | _ -> true
 
     member _.CreateMatcherFor(searchPattern: string) =
         let patternMatcher =
@@ -84,6 +107,31 @@ type internal FSharpNavigableItemsCache
 type internal FSharpNavigateToSearchService [<ImportingConstructor>] (itemsCache: FSharpNavigableItemsCache) =
 
     let getNavigableItems (document: Document) = itemsCache.GetNavigableItems document
+
+    /// A multi-targeted project is one Roslyn project per target framework over the same files. The
+    /// first instance in the solution searches every file; the others only the files they alone compile
+    /// and the files whose parse depends on the defines.
+    let searchedIn (project: Project) =
+        match project.FilePath with
+        | null -> fun (_: Document) -> true
+        | projectPath ->
+            let instances =
+                project.Solution.Projects
+                |> Seq.filter (fun p -> p.FilePath = projectPath)
+                |> Seq.map _.Id
+                |> List.ofSeq
+
+            fun (document: Document) ->
+                match document.FilePath with
+                | null -> true
+                | path ->
+                    let documentIds = project.Solution.GetDocumentIdsWithFilePath path
+
+                    let owner =
+                        instances
+                        |> List.find (fun id -> documentIds |> Seq.exists (fun documentId -> documentId.ProjectId = id))
+
+                    owner = project.Id || itemsCache.HasConditionalDirectives path
 
     let kindsProvided =
         ImmutableHashSet.Create(
@@ -158,46 +206,44 @@ type internal FSharpNavigateToSearchService [<ImportingConstructor>] (itemsCache
 
     let processDocument (tryMatch: NavigableItem -> PatternMatch voption) (kinds: IImmutableSet<string>) (document: Document) =
         cancellableTask {
-            let! ct = CancellableTask.getCancellationToken ()
-
-            let! sourceText = document.GetTextAsync ct
-
             let! items = getNavigableItems document
 
-            let processed =
-                seq {
+            let matches =
+                [|
                     for item in items do
-                        let contains = kinds.Contains(navigateToItemKindToRoslynKind item.Kind)
-                        let patternMatch = tryMatch item
+                        if kinds.Contains(navigateToItemKindToRoslynKind item.Kind) then
+                            match tryMatch item with
+                            | ValueSome m -> yield struct (item, m)
+                            | ValueNone -> ()
+                |]
 
-                        match contains, patternMatch with
-                        | true, ValueSome m ->
-                            let sourceSpan = RoslynHelpers.TryFSharpRangeToTextSpan(sourceText, item.Range)
+            // The text, read from disk for a closed document, is only needed to place the matches.
+            if matches.Length = 0 then
+                return [||]
+            else
+                let! ct = CancellableTask.getCancellationToken ()
+                let! sourceText = document.GetTextAsync ct
 
-                            match sourceSpan with
+                return
+                    [|
+                        for struct (item, m) in matches do
+                            match RoslynHelpers.TryFSharpRangeToTextSpan(sourceText, item.Range) with
                             | ValueNone -> ()
                             | ValueSome sourceSpan ->
-                                let glyph = navigateToItemKindToGlyph item.Kind
-                                let kind = navigateToItemKindToRoslynKind item.Kind
-                                let additionalInfo = formatInfo item.Container document
-
                                 yield
                                     FSharpNavigateToSearchResult(
-                                        additionalInfo,
-                                        kind,
+                                        formatInfo item.Container document,
+                                        navigateToItemKindToRoslynKind item.Kind,
                                         patternMatchKindToNavigateToMatchKind m.Kind,
                                         item.Name,
                                         FSharpNavigableItem(
-                                            glyph,
+                                            navigateToItemKindToGlyph item.Kind,
                                             ImmutableArray.Create(TaggedText(TextTags.Text, item.Name)),
                                             document,
                                             sourceSpan
                                         )
                                     )
-                        | _ -> ()
-                }
-
-            return processed |> Seq.toImmutableArray
+                    |]
         }
 
     interface IFSharpNavigateToSearchService with
@@ -209,10 +255,12 @@ type internal FSharpNavigateToSearchService [<ImportingConstructor>] (itemsCache
 
                 let! results =
                     project.Documents
+                    |> Seq.filter (searchedIn project)
                     |> Seq.map (processDocument tryMatch kinds)
-                    |> CancellableTask.whenAll
+                    // Throttle to avoid launching a parse per document in the project all at once.
+                    |> CancellableTask.whenAllThrottled (max 1 Environment.ProcessorCount)
 
-                return results |> Seq.collect _.AsEnumerable() |> Seq.toImmutableArray
+                return results |> Array.concat |> Array.toImmutableArray
             }
             |> CancellableTask.start cancellationToken
 
