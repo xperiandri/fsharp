@@ -12,7 +12,6 @@ open System.Collections.Generic
 open Internal.Utilities.Library
 open FSharp.Compiler.Diagnostics
 open FSharp.Compiler.IO
-open FSharp.Compiler.NameResolution
 open FSharp.Compiler.Symbols
 open FSharp.Compiler.Syntax
 
@@ -40,6 +39,7 @@ type AssemblySymbol =
     { FullName: string
       CleanedIdents: ShortIdents
       Namespace: ShortIdents option
+      OpenableIdentCount: int
       NearestRequireQualifiedAccessParent: ShortIdents option
       TopRequireQualifiedAccessParent: ShortIdents option
       AutoOpenParent: ShortIdents option
@@ -58,7 +58,10 @@ type Parent =
       TopRequiresQualifiedAccess: (* isForMemberOrValue *) bool -> ShortIdents option
       AutoOpen: ShortIdents option
       WithModuleSuffix: ShortIdents option
-      IsModule: bool }
+      IsModule: bool
+      /// How many leading idents a plain `open` reaches. A type never extends it: everything it
+      /// contains is reached by naming the type, or by opening the type itself.
+      OpenableIdentCount: int }
 
     static member Empty =
         { Namespace = None
@@ -66,7 +69,13 @@ type Parent =
           TopRequiresQualifiedAccess = fun _ -> None
           AutoOpen = None
           WithModuleSuffix = None
-          IsModule = true }
+          IsModule = true
+          OpenableIdentCount = 0 }
+
+    /// The reach of a plain `open` over an entity declared in this parent: the enclosing namespace
+    /// at the very least, and whatever modules the parent chain has added to it.
+    member x.OpenableIdentCountFor (ns: ShortIdents option) =
+        max x.OpenableIdentCount (ns |> Option.map Array.length |> Option.defaultValue 0)
 
     static member RewriteParentIdents (parentIdents: ShortIdents option) (idents: ShortIdents) =
         match parentIdents with
@@ -150,6 +159,7 @@ module AssemblyContent =
             { FullName = fullName
               CleanedIdents = cleanIdents
               Namespace = ns
+              OpenableIdentCount = parent.OpenableIdentCountFor ns
               NearestRequireQualifiedAccessParent = parent.ThisRequiresQualifiedAccess false |> Option.map parent.FixParentModuleSuffix
               TopRequireQualifiedAccessParent = topRequireQualifiedAccessParent
               AutoOpenParent = parent.AutoOpen |> Option.map parent.FixParentModuleSuffix
@@ -169,36 +179,24 @@ module AssemblyContent =
               UnresolvedSymbol = UnresolvedSymbol topRequireQualifiedAccessParent cleanIdents fullName ns
             })
 
-    let createFunctionOrValue ns (parent: Parent) =
+    let traverseMemberFunctionAndValues ns (parent: Parent) (membersFunctionsAndValues: seq<FSharpMemberOrFunctionOrValue>) =
         let topRequireQualifiedAccessParent = parent.TopRequiresQualifiedAccess false |> Option.map parent.FixParentModuleSuffix
-        let nearestRequireQualifiedAccessParent = parent.ThisRequiresQualifiedAccess true |> Option.map parent.FixParentModuleSuffix
         let autoOpenParent = parent.AutoOpen |> Option.map parent.FixParentModuleSuffix
-        fun fullName idents (symbol: FSharpSymbol) isActivePattern ->
-            let cleanedIdents = parent.FixParentModuleSuffix idents
-            { FullName = fullName
-              CleanedIdents = cleanedIdents
-              Namespace = ns
-              NearestRequireQualifiedAccessParent = nearestRequireQualifiedAccessParent
-              TopRequireQualifiedAccessParent = topRequireQualifiedAccessParent
-              AutoOpenParent = autoOpenParent
-              Symbol = symbol
-              Kind = fun _ -> EntityKind.FunctionOrValue isActivePattern
-              UnresolvedSymbol = UnresolvedSymbol topRequireQualifiedAccessParent cleanedIdents fullName ns }
-
-    let isPublic (symbol: FSharpSymbol) =
-        match symbol with
-        | :? FSharpActivePatternCase ->
-            match symbol.Item with
-            | Item.ActivePatternCase case -> case.ActivePatternVal.Accessibility.IsPublic
-            | _ -> symbol.Accessibility.IsPublic
-        | _ -> symbol.Accessibility.IsPublic
-
-    let traverseMemberFunctionAndValues (createSymbol: string -> ShortIdents -> FSharpSymbol -> bool -> AssemblySymbol) (membersFunctionsAndValues: seq<FSharpMemberOrFunctionOrValue>) =
         membersFunctionsAndValues
         |> Seq.filter (fun x -> not x.IsInstanceMember && not x.IsPropertyGetterMethod && not x.IsPropertySetterMethod)
         |> Seq.collect (fun func ->
             let processIdents fullName idents =
-                createSymbol fullName idents func func.IsActivePattern
+                let cleanedIdents = parent.FixParentModuleSuffix idents
+                { FullName = fullName
+                  CleanedIdents = cleanedIdents
+                  Namespace = ns
+                  OpenableIdentCount = parent.OpenableIdentCountFor ns
+                  NearestRequireQualifiedAccessParent = parent.ThisRequiresQualifiedAccess true |> Option.map parent.FixParentModuleSuffix
+                  TopRequireQualifiedAccessParent = topRequireQualifiedAccessParent
+                  AutoOpenParent = autoOpenParent
+                  Symbol = func
+                  Kind = fun _ -> EntityKind.FunctionOrValue func.IsActivePattern
+                  UnresolvedSymbol = UnresolvedSymbol topRequireQualifiedAccessParent cleanedIdents fullName ns }
 
             [ yield! func.TryGetFullDisplayName()
                      |> Option.map (fun fullDisplayName ->
@@ -264,25 +262,16 @@ module AssemblyContent =
                             else parent.WithModuleSuffix
 
                           Namespace = ns
-                          IsModule = entity.IsFSharpModule }
+                          IsModule = entity.IsFSharpModule
 
-                    let createValue = createFunctionOrValue ns currentParent
+                          OpenableIdentCount =
+                            match entity.IsNamespace || entity.IsFSharpModule, currentEntity with
+                            | true, Some e -> e.CleanedIdents.Length
+                            | _ -> parent.OpenableIdentCountFor ns }
+
                     match entity.TryGetMembersFunctionsAndValues() with
                     | xs when xs.Count > 0 ->
-                        yield! traverseMemberFunctionAndValues createValue xs
-                    | _ -> ()
-
-                    match currentEntity with
-                    | Some moduleSymbol when entity.IsFSharpModule ->
-                        for case in entity.ActivePatternCases do
-                            if contentType = Full || isPublic case then
-                                let idents = Array.append moduleSymbol.CleanedIdents [| case.Name |]
-                                let symbol = createValue case.FullName idents case true
-                                let struct (_, openableNs, restIdents) =
-                                    Entity.getOpenableNamespace symbol.TopRequireQualifiedAccessParent symbol.AutoOpenParent symbol.CleanedIdents
-                                yield { symbol with
-                                            UnresolvedSymbol =
-                                                UnresolvedSymbol None (Array.append openableNs restIdents) case.FullName (Some openableNs) }
+                        yield! traverseMemberFunctionAndValues ns currentParent xs
                     | _ -> ()
 
                     for e in (try entity.NestedEntities :> _ seq with _ -> Seq.empty) do
@@ -340,7 +329,7 @@ module AssemblyContent =
         |> List.filter (fun entity ->
             match contentType with
             | Full -> true
-            | Public -> isPublic entity.Symbol)
+            | Public -> entity.Symbol.Accessibility.IsPublic)
 
 type EntityCache() =
     let dic = Dictionary<AssemblyPath, AssemblyContentCacheEntry>()
