@@ -158,6 +158,7 @@ type InsertionContextEntity =
         FullRelativeName: string
         Qualifier: string
         Namespace: string option
+        NamespaceIdentCount: int
         FullDisplayName: string
         LastIdent: ShortIdent
     }
@@ -204,28 +205,10 @@ module Entity =
 
         candidateNs[0 .. nsCount - 1]
 
-    let getOpenableNamespace (requiresQualifiedAccessParent: ShortIdents option) autoOpenParent (candidate: ShortIdents) =
-        let openableNsCount =
-            match requiresQualifiedAccessParent with
-            | Some parent -> min parent.Length candidate.Length
-            | None -> candidate.Length
-
-        let fullOpenableNs = candidate[0 .. openableNsCount - 2]
-        struct (fullOpenableNs, cutAutoOpenModules autoOpenParent fullOpenableNs, candidate[openableNsCount - 1 ..])
-
-    let formatIdents hasCandidateLeaf (idents: ShortIdents) =
-        idents
-        |> Array.mapi (fun index ident ->
-            if hasCandidateLeaf && index = idents.Length - 1 && IsOperatorDisplayName ident then
-                ident
-            else
-                NormalizeIdentifierBackticks ident)
-        |> String.concat "."
-
     let tryCreate
         (
             targetNamespace: ShortIdents option,
-            targetScope: unit -> ShortIdents,
+            targetScope: ShortIdents,
             partiallyQualifiedName: MaybeUnresolvedIdent[],
             requiresQualifiedAccessParent: ShortIdents option,
             autoOpenParent: ShortIdents option,
@@ -247,10 +230,16 @@ module Entity =
                     None
                 else
                     let identCount = parts.Length
-                    let targetScope = targetScope ()
 
-                    let struct (fullOpenableNs, openableNs, restIdents) =
-                        getOpenableNamespace requiresQualifiedAccessParent autoOpenParent candidate
+                    let fullOpenableNs, restIdents =
+                        let openableNsCount =
+                            match requiresQualifiedAccessParent with
+                            | Some parent -> min parent.Length candidate.Length
+                            | None -> candidate.Length
+
+                        candidate[0 .. openableNsCount - 2], candidate[openableNsCount - 1 ..]
+
+                    let openableNs = cutAutoOpenModules autoOpenParent fullOpenableNs
 
                     let getRelativeNs ns =
                         match targetNamespace, candidateNamespace with
@@ -266,12 +255,18 @@ module Entity =
                     | _ ->
                         let fullRelativeName = Array.append (getRelativeNs fullOpenableNs) restIdents
 
+                        // What the suggested `open` covers, named relatively to the current scope and,
+                        // for the count, absolutely: the two differ by the prefix already in scope.
+                        let shortenByQualifiedIdents (idents: ShortIdents) =
+                            if identCount > 1 && relativeNs.Length >= identCount then
+                                idents[0 .. idents.Length - identCount]
+                            else
+                                idents
+
                         let ns =
                             match relativeNs with
                             | [||] -> None
-                            | _ when identCount > 1 && relativeNs.Length >= identCount ->
-                                Some(relativeNs[0 .. relativeNs.Length - identCount] |> formatIdents false)
-                            | _ -> Some(formatIdents false relativeNs)
+                            | _ -> Some(shortenByQualifiedIdents relativeNs |> String.concat ".")
 
                         let qualifier =
                             if fullRelativeName.Length > 1 && fullRelativeName.Length >= identCount then
@@ -281,13 +276,14 @@ module Entity =
 
                         Some
                             {
-                                FullRelativeName = formatIdents true fullRelativeName
-                                Qualifier = formatIdents (qualifier.Length = fullRelativeName.Length) qualifier
+                                FullRelativeName = String.concat "." fullRelativeName //.[0..fullRelativeName.Length - identCount - 1]
+                                Qualifier = String.concat "." qualifier
                                 Namespace = ns
+                                NamespaceIdentCount = (shortenByQualifiedIdents openableNs).Length
                                 FullDisplayName =
                                     match restIdents with
                                     | [| _ |] -> ""
-                                    | _ -> formatIdents true restIdents
+                                    | _ -> String.concat "." restIdents
                                 LastIdent = Array.tryLast restIdents |> Option.defaultValue ""
                             })
 
@@ -1927,9 +1923,9 @@ module ParsedInput =
     //--------------------------------------------------------------------------------------------
     // TryGetInsertionContext
 
-    let getScopeInfo (pos: pos, parsedInput: ParsedInput) =
+    /// Check if we are at an "open" declaration
+    let GetFullNameOfSmallestModuleOrNamespaceAtPoint (pos: pos, parsedInput: ParsedInput) =
         let mutable path = []
-        let mutable scope = []
 
         let visitor =
             { new SyntaxVisitorBase<bool>() with
@@ -1940,26 +1936,12 @@ module ParsedInput =
                 override this.VisitModuleOrNamespace(_, SynModuleOrNamespace(longId = longId; range = range)) =
                     if rangeContainsPos range pos then
                         path <- path @ longId
-                        scope <- scope @ longId
 
                     None // we should traverse the rest of the AST to find the smallest module
-
-                override _.VisitModuleDecl(_, defaultTraverse, decl) =
-                    match decl with
-                    | SynModuleDecl.NestedModule(moduleInfo = info; range = range) when rangeContainsPos range pos ->
-                        scope <- scope @ info.LongIdent
-                    | _ -> ()
-
-                    defaultTraverse decl
             }
 
         SyntaxTraversal.Traverse(pos, parsedInput, visitor) |> ignore
-
-        struct (arrPathOfLid path, arrPathOfLid scope)
-
-    let GetFullNameOfSmallestModuleOrNamespaceAtPoint (pos: pos, parsedInput: ParsedInput) =
-        let struct (path, _) = getScopeInfo (pos, parsedInput)
-        path
+        path |> List.map (fun x -> x.idText) |> List.toArray
 
     let (|ConstructorPats|) pats =
         match pats with
@@ -2593,25 +2575,19 @@ module ParsedInput =
         res, modules
 
     let findBestPositionToInsertOpenDeclaration (modules: FSharpModule list) scope pos (entity: ShortIdents) =
-        match modules |> List.tryFind (fun x -> entity |> Array.startsWith x.Idents) with
-        | None -> struct (scope, { ScopeKind = scope.Kind; Pos = pos })
-        | Some m ->
+        match modules |> List.filter (fun x -> entity |> Array.startsWith x.Idents) with
+        | [] -> { ScopeKind = scope.Kind; Pos = pos }
+        | m :: _ ->
             //printfn "All modules: %A, Win module: %A" modules m
             let scopeKind =
                 match scope.Kind with
                 | TopModule -> NestedModule
                 | x -> x
 
-            let targetScope =
-                { scope with
-                    ShortIdents = m.Idents[0 .. m.Idents.Length - 2]
-                }
-
-            struct (targetScope,
-                    {
-                        ScopeKind = scopeKind
-                        Pos = mkPos (Line.fromZ m.Range.EndLine) m.Range.StartColumn
-                    })
+            {
+                ScopeKind = scopeKind
+                Pos = mkPos (Line.fromZ m.Range.EndLine) m.Range.StartColumn
+            }
 
     let TryFindInsertionContext
         (currentLine: int)
@@ -2621,16 +2597,6 @@ module ParsedInput =
         =
         let res, modules =
             tryFindNearestPointAndModules currentLine parsedInput insertionPoint
-
-        let res =
-            res
-            |> Option.map (fun (scope, ns, pos) ->
-                let namingScope =
-                    { scope with
-                        ShortIdents = ns |> Option.defaultValue scope.ShortIdents
-                    }
-
-                namingScope, ns, pos)
 
         fun
             (requiresQualifiedAccessParent: ShortIdents option,
@@ -2645,16 +2611,11 @@ module ParsedInput =
 
             match res with
             | None -> [||]
-            | Some(namingScope, ns, pos) ->
-                let find () =
-                    findBestPositionToInsertOpenDeclaration modules namingScope pos entity
-
+            | Some(scope, ns, pos) ->
                 let entities =
                     Entity.tryCreate (
                         ns,
-                        (fun () ->
-                            match find () with
-                            | struct (targetScope, _) -> targetScope.ShortIdents),
+                        scope.ShortIdents,
                         partiallyQualifiedName,
                         requiresQualifiedAccessParent,
                         autoOpenParent,
@@ -2663,9 +2624,7 @@ module ParsedInput =
                     )
 
                 entities
-                |> Array.map (fun e ->
-                    match find () with
-                    | struct (_, context) -> e, context)
+                |> Array.map (fun e -> e, findBestPositionToInsertOpenDeclaration modules scope pos entity)
 
     /// Nudges the insertion point past the blank line that conventionally follows a declaration
     /// header, so that the `open` joins the code below it instead of the gap above it.
@@ -2684,11 +2643,7 @@ module ParsedInput =
         =
         let ctx =
             match tryFindNearestPointAndModules currentLine parsedInput insertionPoint with
-            | Some(scope, _, point), modules ->
-                let struct (_, context) =
-                    findBestPositionToInsertOpenDeclaration modules scope point entity
-
-                context
+            | Some(scope, _, point), modules -> findBestPositionToInsertOpenDeclaration modules scope point entity
             | _ ->
                 // we failed to find insertion point because ast is empty for some reason, return top left point in this case
                 {
