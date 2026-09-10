@@ -17,17 +17,17 @@ open System.Collections.Generic
 type internal FSharpGoToDefinitionService [<ImportingConstructor>] (metadataAsSource: FSharpMetadataAsSourceService) =
 
     interface IFSharpGoToDefinitionService with
-        /// Invoked with Peek Definition.
-        member _.FindDefinitionsAsync(document: Document, position: int, _cancellationToken: CancellationToken) =
+        /// Where Go To Definition and Peek Definition arrive: Roslyn searches in the background and
+        /// navigates to the first item itself, cancelling as the caret moves or the user types.
+        member _.FindDefinitionsAsync(document: Document, position: int, cancellationToken: CancellationToken) =
             cancellableTask {
                 let navigation = FSharpNavigation(metadataAsSource, document, rangeStartup)
                 let! res = navigation.FindDefinitionsAsync(position)
                 return (res :> IEnumerable<_>)
             }
-            |> CancellableTask.startWithoutCancellation
+            |> CancellableTask.start cancellationToken
 
-        /// Invoked with Go to Definition.
-        /// Try to navigate to the definition of the symbol at the symbolRange in the originDocument
+        /// The synchronous contract older Roslyn hosts navigate through.
         member _.TryGoToDefinition(document: Document, position: int, cancellationToken: CancellationToken) =
             let navigation = FSharpNavigation(metadataAsSource, document, rangeStartup)
             navigation.TryGoToDefinition(position, cancellationToken)
