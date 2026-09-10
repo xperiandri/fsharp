@@ -134,7 +134,8 @@ module internal CopilotSymbolQuery =
 
             let sourceLines = sourceText.GetLinesAsMemory()
 
-            let scopes = Structure.getOutliningRanges sourceLines parseResults.ParseTree
+            let scopes =
+                Structure.getOutliningRangesFromLineSlices sourceLines parseResults.ParseTree
 
             let struct (firstLine, lastLine) =
                 CopilotSymbolSnippets.definitionLines sourceLines scopes item
