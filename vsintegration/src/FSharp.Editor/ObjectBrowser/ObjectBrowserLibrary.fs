@@ -116,8 +116,10 @@ type internal FSharpObjectBrowserLibrary(workspace: VisualStudioWorkspace, libra
         | true, rows -> rows
         | _ ->
             match ProjectCache.Projects.TryGetValue project with
-            | true, (_, _, _, options) ->
-                let rows = ObjectBrowserItems.referenceItemsOfOptions project.Id options
+            | true, options ->
+                let rows =
+                    ObjectBrowserItems.referenceItemsOfOptions project.Id options.ProjectOptions
+
                 referenceRows[project.Id] <- rows
                 rows
             | _ -> Array.empty
