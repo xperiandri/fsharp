@@ -385,7 +385,7 @@ type internal GoToDefinition(metadataAsSource: FSharpMetadataAsSourceService) =
 
             let inThisFile =
                 function
-                | Some(range: range) when String.Equals(range.FileName, filePath, StringComparison.OrdinalIgnoreCase) -> ValueSome range
+                | Some(range: range) when range.FileName |> isTheFileAt filePath -> ValueSome range
                 | _ -> ValueNone
 
             let symbol = targetSymbolUse.Symbol

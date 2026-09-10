@@ -6,6 +6,29 @@ open FSharp.Compiler.Text
 open System
 open System.IO
 
+/// Whether the file name a compiler range carries is the file at this path. A build that maps its source
+/// paths (`DeterministicSourcePaths`) leaves that name relative to a root the assembly never records, so a
+/// relative one is matched by its tail rather than resolved against the process's current directory —
+/// which is not that root, and belongs to whatever last set it.
+let isTheFileAt (path: string) (fileName: string) =
+    // Paths, not identifiers: the file systems this runs on do not case them.
+    let comparison = StringComparison.OrdinalIgnoreCase
+
+    match path, fileName with
+    | null, _
+    | _, null -> false
+    | path, rooted when Path.IsPathRooted rooted -> String.Equals(Path.GetFullPathSafe rooted, path, comparison)
+    | path, relative ->
+        let separator = string Path.DirectorySeparatorChar
+
+        let fromTheRoot =
+            relative.Split([| '/'; '\\' |], StringSplitOptions.RemoveEmptyEntries)
+            |> Array.filter (fun segment -> segment <> ".")
+            |> String.concat separator
+
+        // Anchored on a separator so that a name matches whole directories, never the tail of one.
+        path.EndsWith($"{separator}{fromTheRoot}", comparison)
+
 type Project with
 
     /// Returns the projectIds of all projects within the same solution that directly reference this project
@@ -81,35 +104,18 @@ type Solution with
     member self.GetAllProjectsThisProjectDependsOn(projectId: ProjectId) =
         self.GetProjectIdsOfAllProjectReferences projectId |> Seq.map self.GetProject
 
-    /// The documents whose file is the one a compiler range names. A build that maps its source paths
-    /// (`DeterministicSourcePaths`) leaves that name relative to a root the assembly never records, and
-    /// the process's current directory is not that root — it is not even the solution's. Such a name is
-    /// matched by its tail against the paths the solution already knows.
+    /// The documents whose file is the one a compiler range names. A name a path map left relative
+    /// reaches no document through the workspace's index, which is keyed by the paths on disk, so it
+    /// is matched against those paths one by one instead.
     member self.GetDocumentIdsWithFSharpFileName(fileName: string) =
         match fileName with
         | null -> []
         | rooted when Path.IsPathRooted rooted -> self.GetDocumentIdsWithFilePath(Path.GetFullPathSafe rooted) |> List.ofSeq
         | relative ->
-            let separator = string Path.DirectorySeparatorChar
-
-            let fromTheRoot =
-                relative.Split([| '/'; '\\' |], StringSplitOptions.RemoveEmptyEntries)
-                |> Array.filter (fun segment -> segment <> ".")
-                |> String.concat separator
-
-            // Anchored on a separator so that a name matches whole directories, never the tail of one.
-            let suffix = $"{separator}{fromTheRoot}"
-
-            let named (document: Document) =
-                match document.FilePath with
-                | null -> false
-                // A path, not an identifier: the file systems this runs on do not case it.
-                | path -> path.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)
-
             [
                 for project in self.Projects do
                     for document in project.Documents do
-                        if named document then
+                        if relative |> isTheFileAt document.FilePath then
                             document.Id
             ]
 
