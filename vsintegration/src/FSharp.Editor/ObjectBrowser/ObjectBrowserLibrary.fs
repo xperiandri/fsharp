@@ -339,8 +339,8 @@ type internal FSharpObjectBrowserLibrary(workspace: VisualStudioWorkspace, libra
                         references
                     )
 
-                metadataAsSource.ShowDocument(projectInfo, documentInfo.FilePath, SourceText.From(text.ToString()))
-                |> ignore
+                metadataAsSource.WriteDocument(documentInfo.FilePath, SourceText.From(text.ToString()))
+                metadataAsSource.ShowDocument(projectInfo, documentInfo.FilePath) |> ignore
 
     let goToSource (item: ObjectListItem) =
         match ObjectBrowserItems.trySymbol item with

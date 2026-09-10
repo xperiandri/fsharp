@@ -29,7 +29,14 @@ type internal FSharpNavigableItemsCache
     (patternMatcherFactory: IPatternMatcherFactory, [<Import(AllowDefault = true)>] workspace: VisualStudioWorkspace) =
 
     let cache =
-        ConcurrentDictionary<DocumentId, struct (VersionStamp * NavigableItem array)>()
+        ConcurrentDictionary<
+            DocumentId,
+            struct {|
+                Version: VersionStamp
+                Approximate: bool
+                Items: NavigableItem array
+            |}
+         >()
 
     /// Whether the file's parse depends on the defines, by file path: known once any instance has parsed it.
     let conditionalDirectives =
@@ -49,24 +56,55 @@ type internal FSharpNavigableItemsCache
         | ParsedInput.ImplFile file -> not file.Trivia.ConditionalDirectives.IsEmpty
         | ParsedInput.SigFile file -> not file.Trivia.ConditionalDirectives.IsEmpty
 
+    let store (document: Document) version approximate (parseTree: ParsedInput) =
+        let items = NavigateTo.GetNavigableItems parseTree
+
+        cache[document.Id] <-
+            struct {|
+                Version = version
+                Approximate = approximate
+                Items = items
+            |}
+
+        match document.FilePath with
+        | null -> ()
+        | path -> conditionalDirectives[path] <- hasConditionalDirectives parseTree
+
+        items
+
     member _.GetNavigableItems(document: Document) =
         cancellableTask {
             let! ct = CancellableTask.getCancellationToken ()
             let! currentVersion = document.GetTextVersionAsync(ct)
 
             match cache.TryGetValue document.Id with
-            | true, struct (version, items) when version = currentVersion -> return items
+            | true, entry when entry.Version = currentVersion && not entry.Approximate -> return entry.Items
             | _ ->
                 let! parseResults = document.GetFSharpParseResultsAsync(nameof (FSharpNavigableItemsCache))
-                let items = NavigateTo.GetNavigableItems parseResults.ParseTree
-                cache[document.Id] <- struct (currentVersion, items)
-
-                match document.FilePath with
-                | null -> ()
-                | path -> conditionalDirectives[path] <- hasConditionalDirectives parseResults.ParseTree
-
-                return items
+                return store document currentVersion false parseResults.ParseTree
         }
+
+    /// The items of a parse that does not wait for the project's compilation options, for the search that runs while
+    /// the solution is still loading. A file behind `#if` can be read under the wrong defines, so the entry it leaves
+    /// behind never answers `GetNavigableItems`.
+    member _.GetNavigableItemsWhileLoading(document: Document) =
+        cancellableTask {
+            let! ct = CancellableTask.getCancellationToken ()
+            let! currentVersion = document.GetTextVersionAsync(ct)
+
+            match cache.TryGetValue document.Id with
+            | true, entry when entry.Version = currentVersion -> return entry.Items
+            | _ ->
+                let! parseResults = document.GetFSharpQuickParseResultsAsync(nameof (FSharpNavigableItemsCache))
+                return store document currentVersion true parseResults.ParseTree
+        }
+
+    /// The items of the document's last parse, whatever version they came from. Reads no text, so a
+    /// closed document costs nothing; a caller that needs the items of the current text asks for them.
+    member _.TryGetCachedNavigableItems(documentId: DocumentId) =
+        match cache.TryGetValue documentId with
+        | true, entry -> ValueSome entry.Items
+        | _ -> ValueNone
 
     /// Whether the file's parse tree, from whichever instance parsed it first, has `#if` directives.
     /// `true` when unknown, so a file no instance has parsed yet is searched everywhere.
@@ -106,8 +144,6 @@ type internal FSharpNavigableItemsCache
 [<Export(typeof<IFSharpNavigateToSearchService>); Shared>]
 type internal FSharpNavigateToSearchService [<ImportingConstructor>] (itemsCache: FSharpNavigableItemsCache) =
 
-    let getNavigableItems (document: Document) = itemsCache.GetNavigableItems document
-
     /// A multi-targeted project is one Roslyn project per target framework over the same files. The
     /// first instance in the solution searches every file; the others only the files they alone compile
     /// and the files whose parse depends on the defines.
@@ -119,7 +155,7 @@ type internal FSharpNavigateToSearchService [<ImportingConstructor>] (itemsCache
                 project.Solution.Projects
                 |> Seq.filter (fun p -> p.FilePath = projectPath)
                 |> Seq.map _.Id
-                |> List.ofSeq
+                |> Seq.toArray
 
             fun (document: Document) ->
                 match document.FilePath with
@@ -129,7 +165,7 @@ type internal FSharpNavigateToSearchService [<ImportingConstructor>] (itemsCache
 
                     let owner =
                         instances
-                        |> List.find (fun id -> documentIds |> Seq.exists (fun documentId -> documentId.ProjectId = id))
+                        |> Array.find (fun id -> documentIds |> Seq.exists (fun documentId -> documentId.ProjectId = id))
 
                     owner = project.Id || itemsCache.HasConditionalDirectives path
 
@@ -204,9 +240,14 @@ type internal FSharpNavigateToSearchService [<ImportingConstructor>] (itemsCache
     let createMatcherFor (searchPattern: string) =
         itemsCache.CreateMatcherFor searchPattern
 
-    let processDocument (tryMatch: NavigableItem -> PatternMatch voption) (kinds: IImmutableSet<string>) (document: Document) =
+    let processDocument
+        (getItems: Document -> CancellableTask<NavigableItem array>)
+        (tryMatch: NavigableItem -> PatternMatch voption)
+        (kinds: IImmutableSet<string>)
+        (document: Document)
+        =
         cancellableTask {
-            let! items = getNavigableItems document
+            let! items = getItems document
 
             let matches =
                 [|
@@ -219,7 +260,7 @@ type internal FSharpNavigateToSearchService [<ImportingConstructor>] (itemsCache
 
             // The text, read from disk for a closed document, is only needed to place the matches.
             if matches.Length = 0 then
-                return [||]
+                return ImmutableArray.Empty
             else
                 let! ct = CancellableTask.getCancellationToken ()
                 let! sourceText = document.GetTextAsync ct
@@ -244,33 +285,92 @@ type internal FSharpNavigateToSearchService [<ImportingConstructor>] (itemsCache
                                         )
                                     )
                     |]
+                    |> ImmutableArray.CreateRange
+        }
+
+    let searchProject (project: Project) searchPattern kinds =
+        cancellableTask {
+            let tryMatch = createMatcherFor searchPattern
+
+            let! results =
+                project.Documents
+                |> Seq.filter (searchedIn project)
+                |> Seq.map (processDocument itemsCache.GetNavigableItems tryMatch kinds)
+                // Throttle to avoid launching a parse per document in the project all at once.
+                |> CancellableTask.whenAllThrottled (max 1 Environment.ProcessorCount)
+
+            return results |> Seq.collect _.AsEnumerable() |> Seq.toImmutableArray
+        }
+
+    /// Priority items first, each half in its original order, as NavigateTo's own service orders its work.
+    let prioritize isPriority items =
+        let priority, rest = items |> Seq.toArray |> Array.partition isPriority
+        [| yield! priority; yield! rest |]
+
+    /// A parse behind the loading search takes a turn on the budget every search shares.
+    let throttled (work: CancellableTask<'a>) =
+        cancellableTask {
+            let! ct = CancellableTask.getCancellationToken ()
+            do! SymbolHelpers.searchThrottle.WaitAsync ct
+
+            try
+                return! work
+            finally
+                SymbolHelpers.searchThrottle.Release() |> ignore
         }
 
     interface IFSharpNavigateToSearchService with
         member _.SearchProjectAsync
             (project, _priorityDocuments, searchPattern, kinds, cancellationToken)
             : Task<ImmutableArray<FSharpNavigateToSearchResult>> =
-            cancellableTask {
-                let tryMatch = createMatcherFor searchPattern
-
-                let! results =
-                    project.Documents
-                    |> Seq.filter (searchedIn project)
-                    |> Seq.map (processDocument tryMatch kinds)
-                    // Throttle to avoid launching a parse per document in the project all at once.
-                    |> CancellableTask.whenAllThrottled (max 1 Environment.ProcessorCount)
-
-                return results |> Array.concat |> Array.toImmutableArray
-            }
+            searchProject project searchPattern kinds
             |> CancellableTask.start cancellationToken
 
         member _.SearchDocumentAsync(document: Document, searchPattern, kinds, cancellationToken) =
-            cancellableTask {
-                let! result = processDocument (createMatcherFor searchPattern) kinds document
-                return Array.toImmutableArray result
-            }
-            |> CancellableTask.start cancellationToken
+            processDocument itemsCache.GetNavigableItems (createMatcherFor searchPattern) kinds document cancellationToken
 
         member _.KindsProvided = kindsProvided
 
         member _.CanFilter = true
+
+    interface IFSharpAdvancedNavigateToSearchService with
+        member _.SearchCachedDocumentsAsync
+            (
+                _solution,
+                projects,
+                priorityDocuments,
+                searchPattern,
+                kinds,
+                _activeDocument,
+                onResultsFound,
+                onProjectCompleted,
+                cancellationToken
+            ) : Task =
+            let tryMatch = createMatcherFor searchPattern
+            let priorityIds = ImmutableHashSet.CreateRange(priorityDocuments |> Seq.map _.Id)
+            let isPriority (document: Document) = priorityIds.Contains document.Id
+
+            let searchDocumentWhileLoading document =
+                cancellableTask {
+                    let! results = throttled (processDocument itemsCache.GetNavigableItemsWhileLoading tryMatch kinds document)
+
+                    if results.Length > 0 then
+                        do! onResultsFound.Invoke results
+                }
+
+            let searchProjectWhileLoading (project: Project) =
+                cancellableTask {
+                    do!
+                        project.Documents
+                        |> Seq.filter (searchedIn project)
+                        |> prioritize isPriority
+                        |> CancellableTask.forEachThrottled Environment.ProcessorCount searchDocumentWhileLoading
+
+                    do! onProjectCompleted.Invoke()
+                }
+
+            projects
+            |> prioritize (fun project -> project.Documents |> Seq.exists isPriority)
+            |> Seq.map searchProjectWhileLoading
+            |> CancellableTask.whenAll
+            |> CancellableTask.startAsTask cancellationToken

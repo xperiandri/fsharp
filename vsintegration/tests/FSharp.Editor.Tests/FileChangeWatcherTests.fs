@@ -39,7 +39,7 @@ type private MockFileChangeContext() =
 
         member _.EnqueueWatchingFile path =
             watched.Add path
-            let token = MockWatchedFile(fun () -> watched.Remove path |> ignore)
+            let token = new MockWatchedFile(fun () -> watched.Remove path |> ignore)
             tokens[path] <- token
             token :> IFSharpWatchedFile
 

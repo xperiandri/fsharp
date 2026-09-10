@@ -6,6 +6,8 @@ open System
 open System.Threading
 open System.Threading.Tasks
 open System.ComponentModel.Composition
+open Microsoft.VisualStudio.Shell
+open Microsoft.VisualStudio.Threading
 
 open Microsoft.CodeAnalysis.Text
 open Microsoft.CodeAnalysis.ExternalAccess.FSharp.Navigation
@@ -69,15 +71,16 @@ type internal FSharpNavigableSymbolSource(metadataAsSource) =
                                 let nav =
                                     { new INavigableSymbol with
                                         member _.Navigate(_: INavigableRelationship) =
-                                            // Need to new up a CTS here instead of re-using the other one, since VS
-                                            // will navigate disconnected from the outer routine, leading to an
-                                            // OperationCancelledException if you use the one defined outside.
-                                            // TODO: review if it's a proper way of doing it
-                                            use ct = new CancellationTokenSource()
+                                            // Ctrl+click calls this on the main thread and gives us no token of its
+                                            // own: generating the signature and checking it belong to the background,
+                                            // and only opening the document comes back here.
+                                            let navigation =
+                                                ThreadHelper.JoinableTaskFactory.RunAsync(fun () ->
+                                                    gtd.NavigateToExternalDeclarationAsync(targetSymbolUse, metadataReferences)
+                                                    |> CancellableTask.startWithoutCancellation
+                                                    :> Task)
 
-                                            do
-                                                gtd.NavigateToExternalDeclaration(targetSymbolUse, metadataReferences, ct.Token)
-                                                |> ignore
+                                            navigation.FileAndForget "fsharp/navigateToExternalDeclaration"
 
                                         member _.Relationships = seq { yield PredefinedNavigableRelationships.Definition }
 
