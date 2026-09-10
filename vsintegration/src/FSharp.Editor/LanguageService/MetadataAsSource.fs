@@ -159,19 +159,21 @@ type FSharpMetadataAsSourceService() =
         let projsArr = projs.ToArray()
         projsArr |> Array.iter (fun pair -> clear pair.Key pair.Value)
 
-    member _.ShowDocument(projInfo: ProjectInfo, filePath: string, text: Text.SourceText) =
+    /// Puts the generated signature on disk, where opening it reads it from. Touches no workspace,
+    /// so the caller can do it before taking the main thread.
+    member _.WriteDocument(filePath: string, text: Text.SourceText) =
+        let directoryName = Path.GetDirectoryName filePath
+
+        if Directory.Exists directoryName |> not then
+            Directory.CreateDirectory directoryName |> ignore
+
+        use fileStream = new FileStream(filePath, IO.FileMode.Create)
+        use writer = new StreamWriter(fileStream)
+        text.Write writer
+
+    member _.ShowDocument(projInfo: ProjectInfo, filePath: string) =
         match projInfo.Documents |> Seq.tryFindV (fun doc -> doc.FilePath = filePath) with
         | ValueSome document ->
-            let _ =
-                let directoryName = Path.GetDirectoryName(filePath)
-
-                if Directory.Exists(directoryName) |> not then
-                    Directory.CreateDirectory(directoryName) |> ignore
-
-                use fileStream = new FileStream(filePath, IO.FileMode.Create)
-                use writer = new StreamWriter(fileStream)
-                text.Write(writer)
-
             let projectFile = Path.ChangeExtension(filePath, "fsproj")
             let projectContext = createMetadataProjectContext projectFile projInfo document
 

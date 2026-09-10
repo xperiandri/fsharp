@@ -52,6 +52,9 @@ exception MyError of string
 let private document = RoslynTestHelpers.GetFsDocument source
 let private project = document.Project
 
+let private cache =
+    MefHelpers.createExportProvider().GetExportedValue<FSharpNavigableItemsCache>()
+
 let private run computation =
     computation |> CancellableTask.start CancellationToken.None |> _.Result
 
@@ -61,11 +64,7 @@ let private lineOf (text: string) =
     |> Array.findIndex (fun line -> line.IndexOf(text, StringComparison.Ordinal) >= 0)
     |> (+) 1
 
-let private items =
-    document.GetFSharpParseResultsAsync "test"
-    |> run
-    |> _.ParseTree
-    |> NavigateTo.GetNavigableItems
+let private items = cache.GetNavigableItems document |> run
 
 [<Theory>]
 [<InlineData("T:Widgets.Counter", "type Counter")>]
@@ -89,7 +88,7 @@ let ``the fast path finds the declaration and agrees with the whole project chec
     let path = CrossLanguageSymbolNavigation.docCommentIdToPath docId
 
     let fast =
-        CrossLanguageSymbolNavigation.tryLocateViaNavigableItems docId path project
+        CrossLanguageSymbolNavigation.tryLocateViaNavigableItems cache docId path project
         |> run
 
     let full =
@@ -108,7 +107,7 @@ let ``the fast path finds the declaration and agrees with the whole project chec
 [<InlineData("not a doc id")>]
 let ``an unknown or malformed id yields no location`` (docId: string) =
     let found =
-        CrossLanguageSymbolNavigation.tryFindDeclaration project.Solution project.AssemblyName docId
+        CrossLanguageSymbolNavigation.tryFindDeclaration cache project.Solution project.AssemblyName docId
         |> run
 
     Assert.True(found.IsNone, $"%A{found}")
@@ -147,7 +146,7 @@ let ``candidate documents come in compile order, signature first`` () =
     let project = solution.Projects |> Seq.exactlyOne
 
     let candidates =
-        CrossLanguageSymbolNavigation.candidateDocuments [ syntheticProject.Name; "ModuleSecond" ] project
+        CrossLanguageSymbolNavigation.candidateDocuments cache [ syntheticProject.Name; "ModuleSecond" ] project
         |> run
         |> List.map _.FilePath
 
@@ -179,7 +178,7 @@ let ``the first instance of a multi-targeted project answers`` () =
         RoslynTestHelpers.SetProjectOptions id solution options
 
     let found =
-        CrossLanguageSymbolNavigation.tryFindDeclaration solution "test.dll" "M:Widgets.twice(System.Int32)"
+        CrossLanguageSymbolNavigation.tryFindDeclaration cache solution "test.dll" "M:Widgets.twice(System.Int32)"
         |> run
 
     match found with

@@ -23,12 +23,14 @@ let private source = CallStackSample.sourceText ()
 let private lineIn (text: string) (snippet: string) =
     let lines = text.Replace("\r\n", "\n").Split('\n')
 
+    // FSharp.Core's own, not the inline helper in FSharp.Editor: an internal inline value cannot be
+    // inlined from another assembly under --optimize+, which is FS1116/FS1118 in a Release build.
     match
         lines
-        |> Array.tryFindIndexV (fun line -> line.IndexOf(snippet, StringComparison.Ordinal) >= 0)
+        |> Array.tryFindIndex (fun line -> line.IndexOf(snippet, StringComparison.Ordinal) >= 0)
     with
-    | ValueSome i -> i + 1
-    | ValueNone -> failwith $"snippet not found in the sample: %s{snippet}"
+    | Some i -> i + 1
+    | None -> failwith $"snippet not found in the sample: %s{snippet}"
 
 let private lineOf = lineIn source
 

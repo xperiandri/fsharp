@@ -96,7 +96,7 @@ type TextViewEventsHandler
 type ConnectionPointSubscription = System.IDisposable option
 
 // Usage example:
-//  If a handler is ValueNone, to not handle that event
+//  If a handler is None, to not handle that event
 //  let subscription = subscribeToTextViewEvents (textView, onChangeCaretHandler, onKillFocus, onSetFocus)
 //  Unsubscribe using subscription.Dispose()
 let subscribeToTextViewEvents (textView: IVsTextView, onChangeCaretHandler, onKillFocus, onSetFocus) : ConnectionPointSubscription =
@@ -425,6 +425,33 @@ module Option =
             None
 
 [<RequireQualifiedAccess>]
+module ValueOption =
+
+    let guard (x: bool) : ValueOption<unit> = if x then ValueSome() else ValueNone
+
+    let attempt (f: unit -> 'T) =
+        try
+            Some <| f ()
+        with _ ->
+            None
+
+    /// Returns 'Some list' if all elements in the list are Some, otherwise None
+    let ofOptionList (xs: 'a option list) : 'a list voption =
+
+        if xs |> List.forall Option.isSome then
+            xs |> List.map Option.get |> ValueSome
+        else
+            ValueNone
+
+    /// Returns 'Some list' if all elements in the list are Some, otherwise None
+    let ofValueOptionList (xs: 'a ValueOption list) : 'a list ValueOption =
+
+        if xs |> List.forall ValueOption.isSome then
+            xs |> List.map ValueOption.get |> ValueSome
+        else
+            ValueNone
+
+[<RequireQualifiedAccess>]
 module IEnumerator =
     let chooseV f (e: IEnumerator<'T>) =
         let mutable started = false
@@ -513,7 +540,7 @@ module Seq =
 
         res
 
-    let chooseV (chooser: 'a -> 'b voption) source =
+    let chooseV< 'a, 'b > (chooser: 'a -> 'b voption) source =
         revamp (IEnumerator.chooseV chooser) source
 
 [<RequireQualifiedAccess>]

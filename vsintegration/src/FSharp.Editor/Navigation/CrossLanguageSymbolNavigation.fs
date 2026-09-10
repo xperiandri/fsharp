@@ -264,7 +264,7 @@ module internal CrossLanguageSymbolNavigation =
         | _ -> false
 
     /// The project's documents whose parse tree declares the entity, in compile order.
-    let candidateDocuments (entityPath: string list) (project: Project) =
+    let candidateDocuments (itemsCache: FSharpNavigableItemsCache) (entityPath: string list) (project: Project) =
         cancellableTask {
             let! ct = CancellableTask.getCancellationToken ()
             let! _, _, _, options = project.GetFSharpCompilationOptionsAsync()
@@ -277,12 +277,9 @@ module internal CrossLanguageSymbolNavigation =
             let declaresIn (document: Document) =
                 cancellableTask {
                     ct.ThrowIfCancellationRequested()
-                    let! parseResults = document.GetFSharpParseResultsAsync UserOpName
+                    let! items = itemsCache.GetNavigableItems document
 
-                    if
-                        NavigateTo.GetNavigableItems parseResults.ParseTree
-                        |> Array.exists (declaresEntity entityPath)
-                    then
+                    if items |> Array.exists (declaresEntity entityPath) then
                         return ValueSome document
                     else
                         return ValueNone
@@ -307,19 +304,25 @@ module internal CrossLanguageSymbolNavigation =
 
     let private tryLocateInDocument (byShape: bool) (documentationCommentId: string) (path: DocCommentId) (document: Document) =
         cancellableTask {
-            let! _, checkResults = document.GetFSharpParseAndCheckResultsAsync UserOpName
-
-            return
-                declarationsIn byShape checkResults.PartialAssemblySignature documentationCommentId path
-                |> Seq.tryHeadV
+            match! document.TryGetFSharpParseAndCheckResultsAsync UserOpName with
+            | ValueNone -> return ValueNone
+            | ValueSome(struct (_, checkResults)) ->
+                return
+                    declarationsIn byShape checkResults.PartialAssemblySignature documentationCommentId path
+                    |> Seq.tryHeadV
         }
 
     /// Checks only the documents that declare the entity. An exact id match in any of them wins;
     /// the name-and-shape heuristics run only on the last one, whose partial signature holds every
     /// member the entity gets from the files that declare it.
-    let tryLocateViaNavigableItems (documentationCommentId: string) (path: DocCommentId) (project: Project) =
+    let tryLocateViaNavigableItems
+        (itemsCache: FSharpNavigableItemsCache)
+        (documentationCommentId: string)
+        (path: DocCommentId)
+        (project: Project)
+        =
         cancellableTask {
-            let! candidates = candidateDocuments (entityPathOf path) project
+            let! candidates = candidateDocuments itemsCache (entityPathOf path) project
 
             match!
                 candidates
@@ -344,7 +347,12 @@ module internal CrossLanguageSymbolNavigation =
         }
 
     /// The declaration's range and the project holding it, for the assembly name and doc id Roslyn passes.
-    let tryFindDeclaration (solution: Solution) (assemblyName: string) (documentationCommentId: string) =
+    let tryFindDeclaration
+        (itemsCache: FSharpNavigableItemsCache)
+        (solution: Solution)
+        (assemblyName: string)
+        (documentationCommentId: string)
+        =
         match docCommentIdToPath documentationCommentId with
         | DocCommentId.None -> CancellableTask.singleton ValueNone
         | path ->
@@ -356,7 +364,7 @@ module internal CrossLanguageSymbolNavigation =
                     |> Seq.filter (fun p -> p.IsFSharp && p.AssemblyName = assemblyName)
                     |> Seq.groupBy _.FilePath
                     |> Seq.map (snd >> List.ofSeq)
-                    |> List.ofSeq
+                    |> Seq.toList
 
                 let ordered =
                     [
@@ -371,12 +379,15 @@ module internal CrossLanguageSymbolNavigation =
 
                 match!
                     ordered
-                    |> CancellableTask.tryPick (located (tryLocateViaNavigableItems documentationCommentId path))
+                    |> CancellableTask.tryPick (located (tryLocateViaNavigableItems itemsCache documentationCommentId path))
                 with
                 | ValueSome found -> return ValueSome found
                 | ValueNone ->
+                    // Checking a whole project is the expensive answer, and the target frameworks of one
+                    // project check the same declarations: whatever only one of them compiles is under
+                    // conditional compilation, which the parsed declarations above already covered.
                     return!
-                        ordered
+                        [ for instance in instances -> instance.Head ]
                         |> CancellableTask.tryPick (located (tryLocateInProject documentationCommentId path))
             }
 
@@ -384,7 +395,11 @@ module internal CrossLanguageSymbolNavigation =
 [<Export(typeof<FSharpCrossLanguageSymbolNavigationService>)>]
 type internal FSharpCrossLanguageSymbolNavigationService
     [<ImportingConstructor>]
-    (metadataAsSource: FSharpMetadataAsSourceService, [<Import(AllowDefault = true)>] workspace: VisualStudioWorkspace) =
+    (
+        itemsCache: FSharpNavigableItemsCache,
+        metadataAsSource: FSharpMetadataAsSourceService,
+        [<Import(AllowDefault = true)>] workspace: VisualStudioWorkspace | null
+    ) =
 
     static member internal DocCommentIdToPath(docId: string) =
         CrossLanguageSymbolNavigation.docCommentIdToPath docId
@@ -398,7 +413,11 @@ type internal FSharpCrossLanguageSymbolNavigationService
                 | null -> return null
                 | workspace ->
                     match!
-                        CrossLanguageSymbolNavigation.tryFindDeclaration workspace.CurrentSolution assemblyName documentationCommentId
+                        CrossLanguageSymbolNavigation.tryFindDeclaration
+                            itemsCache
+                            workspace.CurrentSolution
+                            assemblyName
+                            documentationCommentId
                     with
                     | ValueSome(struct (range, project)) ->
                         return FSharpNavigableLocation(metadataAsSource, range, project) :> IFSharpNavigableLocation
