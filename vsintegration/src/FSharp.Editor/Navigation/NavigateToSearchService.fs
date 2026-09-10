@@ -265,7 +265,11 @@ type internal FSharpNavigateToSearchService [<ImportingConstructor>] (itemsCache
             |> CancellableTask.start cancellationToken
 
         member _.SearchDocumentAsync(document: Document, searchPattern, kinds, cancellationToken) =
-            processDocument (createMatcherFor searchPattern) kinds document cancellationToken
+            cancellableTask {
+                let! result = processDocument (createMatcherFor searchPattern) kinds document
+                return Array.toImmutableArray result
+            }
+            |> CancellableTask.start cancellationToken
 
         member _.KindsProvided = kindsProvided
 
