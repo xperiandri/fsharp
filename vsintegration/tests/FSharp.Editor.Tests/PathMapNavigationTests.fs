@@ -66,6 +66,18 @@ let ``goto definition into a project built with a path map reaches its source`` 
     | ValueSome(FSharpGoToDefinitionResult.NavigableItem item, _) -> Assert.Equal(library.GetFilePath "Library", item.Document.FilePath)
     | result -> failwith $"expected a navigable item, got %A{result}"
 
+/// The one rule the document lookup and the search for a declaration inside a document both go through.
+/// A mapped name arrives with the separator its replacement doubled (`.\` + `\rest`), which is what the
+/// compiler writes and what a build on a path map hands back.
+[<Theory>]
+[<InlineData(@"D:\repo\src\Lib\File.fs", @".\\src\Lib\File.fs", true)>]
+[<InlineData(@"D:\repo\src\Lib\File.fs", @"./src/Lib/File.fs", true)>]
+[<InlineData(@"D:\repo\src\Lib\File.fs", @"D:\repo\src\Lib\File.fs", true)>]
+[<InlineData(@"D:\repo\src\Lib\File.fs", @"ib\File.fs", false)>]
+[<InlineData(@"D:\repo\src\Lib\File.fs", @".\src\Other\File.fs", false)>]
+let ``a relative name denotes the file whose path ends with it`` (path: string) (fileName: string) (expected: bool) =
+    Assert.Equal(expected, fileName |> isTheFileAt path)
+
 /// An assembly built with a path map records no root for the names it maps, so a name that arrives
 /// relative cannot be resolved against the current directory: that belongs to the process, not to the
 /// solution, and points wherever the last component to set it left it.
