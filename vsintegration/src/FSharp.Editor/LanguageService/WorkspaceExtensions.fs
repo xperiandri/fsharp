@@ -817,8 +817,8 @@ type Project with
                 symbol.SignatureLocation
                 |> Option.orElse symbol.DeclarationLocation
                 |> Option.bind (fun range ->
-                    this.Solution.GetDocumentIdsWithFilePath(Path.GetFullPathSafe range.FileName)
-                    |> Seq.tryFind (fun id -> id.ProjectId = this.Id)
+                    this.Solution.GetDocumentIdsWithFSharpFileName range.FileName
+                    |> List.tryFind (fun id -> id.ProjectId = this.Id)
                     |> Option.map this.GetDocument)
 
             // Documents before the declaration in compile order cannot refer to it.

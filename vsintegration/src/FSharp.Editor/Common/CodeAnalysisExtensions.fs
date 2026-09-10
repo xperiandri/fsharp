@@ -3,6 +3,7 @@ module internal Microsoft.VisualStudio.FSharp.Editor.CodeAnalysisExtensions
 
 open Microsoft.CodeAnalysis
 open FSharp.Compiler.Text
+open System
 open System.IO
 
 type Project with
@@ -80,12 +81,42 @@ type Solution with
     member self.GetAllProjectsThisProjectDependsOn(projectId: ProjectId) =
         self.GetProjectIdsOfAllProjectReferences projectId |> Seq.map self.GetProject
 
+    /// The documents whose file is the one a compiler range names. A build that maps its source paths
+    /// (`DeterministicSourcePaths`) leaves that name relative to a root the assembly never records, and
+    /// the process's current directory is not that root — it is not even the solution's. Such a name is
+    /// matched by its tail against the paths the solution already knows.
+    member self.GetDocumentIdsWithFSharpFileName(fileName: string) =
+        match fileName with
+        | null -> []
+        | rooted when Path.IsPathRooted rooted -> self.GetDocumentIdsWithFilePath(Path.GetFullPathSafe rooted) |> List.ofSeq
+        | relative ->
+            let separator = string Path.DirectorySeparatorChar
+
+            let fromTheRoot =
+                relative.Split([| '/'; '\\' |], StringSplitOptions.RemoveEmptyEntries)
+                |> Array.filter (fun segment -> segment <> ".")
+                |> String.concat separator
+
+            // Anchored on a separator so that a name matches whole directories, never the tail of one.
+            let suffix = $"{separator}{fromTheRoot}"
+
+            let named (document: Document) =
+                match document.FilePath with
+                | null -> false
+                // A path, not an identifier: the file systems this runs on do not case it.
+                | path -> path.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)
+
+            [
+                for project in self.Projects do
+                    for document in project.Documents do
+                        if named document then
+                            document.Id
+            ]
+
     /// Try to retrieve the corresponding DocumentId for the range's file in the solution
     /// and if a projectId is provided, only try to find the document within that project
     /// or a project referenced by that project
     member self.TryGetDocumentIdFromFSharpRange(range: range, ?projectId: ProjectId) =
-
-        let filePath = System.IO.Path.GetFullPathSafe range.FileName
 
         let checkProjectId (docId: DocumentId) =
             if projectId.IsSome then
@@ -107,7 +138,7 @@ type Solution with
                         matchingDoc tail
                 | None -> Some docId
 
-        self.GetDocumentIdsWithFilePath filePath |> List.ofSeq |> matchingDoc
+        self.GetDocumentIdsWithFSharpFileName range.FileName |> matchingDoc
 
     /// Try to retrieve the corresponding Document for the range's file in the solution
     /// and if a projectId is provided, only try to find the document within that project
@@ -130,11 +161,9 @@ type Document with
 
     /// Every document with the file path, from whichever project includes it.
     member document.GetSolutionDocumentsWithFilePath(filePath: string) =
-        let filePath = Path.GetFullPathSafe filePath
-
         document.TryFindInSolutions(fun solution ->
-            match solution.GetDocumentIdsWithFilePath filePath with
-            | ids when ids.IsEmpty -> ValueNone
+            match solution.GetDocumentIdsWithFSharpFileName filePath with
+            | [] -> ValueNone
             | ids -> ValueSome [ for id in ids -> solution.GetDocument id ])
         |> ValueOption.defaultValue []
 

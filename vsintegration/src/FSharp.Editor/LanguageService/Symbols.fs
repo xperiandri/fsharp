@@ -84,7 +84,7 @@ type FSharpSymbolUse with
                     Some(SymbolScope.Projects([ currentDocument.Project ], isSymbolLocalForProject))
                 else
                     let projects =
-                        currentDocument.GetSolutionDocumentsWithFilePath filePath
+                        currentDocument.GetSolutionDocumentsWithFilePath loc.FileName
                         |> List.map _.Project
                         |> List.distinctBy _.Id
 
