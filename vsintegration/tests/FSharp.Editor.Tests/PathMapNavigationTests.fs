@@ -10,6 +10,7 @@ open System.Threading
 open Xunit
 open Microsoft.VisualStudio.FSharp.Editor
 open Microsoft.VisualStudio.FSharp.Editor.CancellableTasks
+open FSharp.Compiler.Text
 open FSharp.Editor.Tests.Helpers
 open FSharp.Test.ProjectGeneration
 
@@ -64,3 +65,32 @@ let ``goto definition into a project built with a path map reaches its source`` 
     match result with
     | ValueSome(FSharpGoToDefinitionResult.NavigableItem item, _) -> Assert.Equal(library.GetFilePath "Library", item.Document.FilePath)
     | result -> failwith $"expected a navigable item, got %A{result}"
+
+/// An assembly built with a path map records no root for the names it maps, so a name that arrives
+/// relative cannot be resolved against the current directory: that belongs to the process, not to the
+/// solution, and points wherever the last component to set it left it.
+[<Fact>]
+let ``a range a path map left relative still names its document`` () =
+    let real = library.GetFilePath "Library"
+    let root = Path.GetDirectoryName library.ProjectDir
+
+    let relative =
+        $".\\{real.Substring(root.Length).TrimStart(Path.DirectorySeparatorChar)}"
+
+    let range = Range.mkRange relative (Position.mkPos 1 0) (Position.mkPos 1 0)
+
+    match solution.TryGetDocumentIdFromFSharpRange range with
+    | Some documentId -> Assert.Equal(real, solution.GetDocument(documentId).FilePath)
+    | None -> failwith $"no document is named by {relative}"
+
+[<Fact>]
+let ``a relative name is matched by whole directories, not by the tail of one`` () =
+    let real = library.GetFilePath "Library"
+    let root = Path.GetDirectoryName library.ProjectDir
+    let insideASegment = real.Substring(root.Length + 2)
+
+    let range = Range.mkRange insideASegment (Position.mkPos 1 0) (Position.mkPos 1 0)
+
+    match solution.TryGetDocumentIdFromFSharpRange range with
+    | Some documentId -> failwith $"{insideASegment} must not name {solution.GetDocument(documentId).FilePath}"
+    | None -> ()
