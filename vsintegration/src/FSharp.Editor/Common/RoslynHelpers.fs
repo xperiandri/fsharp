@@ -135,9 +135,7 @@ module internal RoslynHelpers =
                     return! computation
                 }
 
-        let tcs =
-            new TaskCompletionSource<_>(TaskCreationOptions.RunContinuationsAsynchronously)
-
+        let tcs = new TaskCompletionSource<_>(TaskCreationOptions.None)
         let barrier = VolatileBarrier()
 
         let reg =
@@ -275,7 +273,20 @@ module internal OpenDeclarationHelper =
             | _ when getLineStr line.LineNumber = "" -> lineBreak
             | _ -> lineBreak + lineBreak
 
-        TextChange(TextSpan(line.Start, 0), separatorAbove + String(' ', pos.Column) + declaration + separatorBelow)
+        let margin = String(' ', pos.Column)
+        let column = min pos.Column (line.End - line.Start)
+        let trivia = sourceText.ToString(TextSpan(line.Start, column)).TrimEnd()
+
+        // Anything but whitespace before the insertion point is trivia the scope's first declaration
+        // follows on its line - a block comment closing there, say. Break the line at the declaration
+        // rather than write the open into the middle of what precedes it.
+        if trivia.Length > 0 then
+            TextChange(
+                TextSpan(line.Start + trivia.Length, column - trivia.Length),
+                lineBreak + margin + declaration + lineBreak + lineBreak + margin
+            )
+        else
+            TextChange(TextSpan(line.Start, 0), separatorAbove + margin + declaration + separatorBelow)
 
     /// <summary>
     /// Inserts open declaration into `SourceText`.
