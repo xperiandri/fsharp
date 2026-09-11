@@ -36,12 +36,17 @@ type private NavigableItemsEntry =
         Items: NavigableItem array
     }
 
-/// Parse-tree navigable items per document, cached on the document's text version.
+/// Parse-tree navigable items per document, cached on the document's text version, and kept in persistent storage
+/// on the text's checksum so that the next session reads them back instead of parsing.
 /// Shared by NavigateTo and by the Copilot chat mention provider.
 [<Export; Shared>]
 type internal FSharpNavigableItemsCache
     [<ImportingConstructor>]
-    (patternMatcherFactory: IPatternMatcherFactory, [<Import(AllowDefault = true)>] workspace: VisualStudioWorkspace) =
+    (
+        patternMatcherFactory: IPatternMatcherFactory,
+        storageService: IFSharpChecksummedPersistentStorageService,
+        [<Import(AllowDefault = true)>] workspace: VisualStudioWorkspace
+    ) =
 
     /// A multi-targeted project is one Roslyn project per target framework over the same files, so the same
     /// file is parsed once per instance. A parse whose tree holds no conditional directives does not depend
@@ -89,18 +94,10 @@ type internal FSharpNavigableItemsCache
             | ValueSome entry -> ValueSome entry
             | ValueNone -> entry (definesOf document)
 
-    let store (document: Document) version approximate (parseTree: ParsedInput) =
-        let items = NavigateTo.GetNavigableItems parseTree
-
+    let remember (document: Document) defines version approximate items =
         match document.FilePath with
         | null -> ()
         | path ->
-            let defines =
-                if dependsOnDefines parseTree then
-                    definesOf document
-                else
-                    AnyDefines
-
             cache[{ Defines = defines; FilePath = path }] <-
                 {
                     Version = version
@@ -108,7 +105,29 @@ type internal FSharpNavigableItemsCache
                     Items = items
                 }
 
+    let store (document: Document) version approximate (parseTree: ParsedInput) =
+        let items = NavigateTo.GetNavigableItems parseTree
+
+        let defines =
+            if dependsOnDefines parseTree then
+                definesOf document
+            else
+                AnyDefines
+
+        remember document defines version approximate items
         items
+
+    /// Storage keeps one entry per document, under the checksum of the text alone when its tree holds no conditional
+    /// directives and of the text and the defines when it does — as the memory entry is kept under `AnyDefines` or
+    /// the defines — so a read tries one checksum, then the other.
+    let tryRestore (document: Document) defines version approximate checksum =
+        cancellableTask {
+            match! NavigableItemsIndex.tryLoad storageService document checksum with
+            | ValueSome items ->
+                remember document defines version approximate items
+                return ValueSome items
+            | ValueNone -> return ValueNone
+        }
 
     member _.GetNavigableItems(document: Document) =
         cancellableTask {
@@ -118,13 +137,39 @@ type internal FSharpNavigableItemsCache
             match tryCached document ((=) currentVersion) with
             | ValueSome entry when not entry.Approximate -> return entry.Items
             | _ ->
-                let! parseResults = document.GetFSharpParseResultsAsync(nameof (FSharpNavigableItemsCache))
-                return store document currentVersion false parseResults.ParseTree
+                let! text = document.GetTextAsync(ct)
+                let textChecksum = NavigableItemsIndex.textChecksum text
+
+                match! tryRestore document AnyDefines currentVersion false textChecksum with
+                | ValueSome items -> return items
+                | ValueNone ->
+                    // The defines are only the project's once it has its options.
+                    let! _ = document.GetFSharpCompilationOptionsAsync(nameof (FSharpNavigableItemsCache))
+                    let defines = definesOf document
+
+                    let definesChecksum =
+                        NavigableItemsIndex.textAndDefinesChecksum textChecksum defines
+
+                    match! tryRestore document defines currentVersion false definesChecksum with
+                    | ValueSome items -> return items
+                    | ValueNone ->
+                        let! parseResults = document.GetFSharpParseResultsAsync(nameof (FSharpNavigableItemsCache))
+                        let parseTree = parseResults.ParseTree
+                        let items = store document currentVersion false parseTree
+
+                        let checksum =
+                            if dependsOnDefines parseTree then
+                                definesChecksum
+                            else
+                                textChecksum
+
+                        do! NavigableItemsIndex.save storageService document checksum items
+                        return items
         }
 
     /// The items of a parse that does not wait for the project's compilation options, for the search that runs while
     /// the solution is still loading. A file behind `#if` can be read under the wrong defines, so the entry it leaves
-    /// behind never answers `GetNavigableItems`.
+    /// behind never answers `GetNavigableItems`, and is not stored.
     member _.GetNavigableItemsWhileLoading(document: Document) =
         cancellableTask {
             let! ct = CancellableTask.getCancellationToken ()
@@ -133,8 +178,22 @@ type internal FSharpNavigableItemsCache
             match tryCached document ((=) currentVersion) with
             | ValueSome entry -> return entry.Items
             | ValueNone ->
-                let! parseResults = document.GetFSharpQuickParseResultsAsync(nameof (FSharpNavigableItemsCache))
-                return store document currentVersion true parseResults.ParseTree
+                let! text = document.GetTextAsync(ct)
+                let textChecksum = NavigableItemsIndex.textChecksum text
+
+                match! tryRestore document AnyDefines currentVersion false textChecksum with
+                | ValueSome items -> return items
+                | ValueNone ->
+                    let defines = definesOf document
+
+                    let definesChecksum =
+                        NavigableItemsIndex.textAndDefinesChecksum textChecksum defines
+
+                    match! tryRestore document defines currentVersion true definesChecksum with
+                    | ValueSome items -> return items
+                    | ValueNone ->
+                        let! parseResults = document.GetFSharpQuickParseResultsAsync(nameof (FSharpNavigableItemsCache))
+                        return store document currentVersion true parseResults.ParseTree
         }
 
     /// The items of the document's last parse, whatever version they came from. Reads no text, so a
