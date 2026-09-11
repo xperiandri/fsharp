@@ -100,7 +100,7 @@ let ``Fixes FS0039 for missing opens - declaration shares its line with the end 
 """
 
     let expected =
-        Some
+        [
             {
                 Message = "open System"
                 FixedCode =
@@ -111,10 +111,11 @@ let ``Fixes FS0039 for missing opens - declaration shares its line with the end 
    Console.WriteLine 42
 """
             }
+        ]
 
-    let actual = codeFix |> tryFix code Auto
+    let actual = openFixes code Auto
 
-    Assert.Equal(expected, actual)
+    Assert.Equal<TestCodeFix list>(expected, actual)
 
 [<Fact>]
 let ``Fixes FS0039 for missing opens - there is already an open directive`` () =
