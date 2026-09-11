@@ -21,6 +21,21 @@ open FSharp.Compiler.EditorServices
 open FSharp.Compiler.Syntax
 open CancellableTasks
 
+/// Where a parse of a file is kept: under the defines it was parsed with, or under `AnyDefines` when its tree
+/// holds no conditional directives and so reads the same under any of them.
+[<Struct>]
+type private NavigableItemsKey = { Defines: string; FilePath: string }
+
+/// The navigable items of one parse of a file, and the text version it was taken from.
+[<Struct>]
+type private NavigableItemsEntry =
+    {
+        Version: VersionStamp
+        /// Parsed without the project's defines, while the solution was still loading.
+        Approximate: bool
+        Items: NavigableItem array
+    }
+
 /// Parse-tree navigable items per document, cached on the document's text version.
 /// Shared by NavigateTo and by the Copilot chat mention provider.
 [<Export; Shared>]
@@ -28,19 +43,19 @@ type internal FSharpNavigableItemsCache
     [<ImportingConstructor>]
     (patternMatcherFactory: IPatternMatcherFactory, [<Import(AllowDefault = true)>] workspace: VisualStudioWorkspace) =
 
-    let cache =
-        ConcurrentDictionary<
-            DocumentId,
-            struct {|
-                Version: VersionStamp
-                Approximate: bool
-                Items: NavigableItem array
-            |}
-         >()
+    /// A multi-targeted project is one Roslyn project per target framework over the same files, so the same
+    /// file is parsed once per instance. A parse whose tree holds no conditional directives does not depend
+    /// on the defines: it is stored under `AnyDefines` and every instance reuses it. One that does hold them
+    /// is stored per define set, because those instances genuinely parse the file differently.
+    ///
+    /// The duplicate results that produces are not for this service to remove: `NavigateToSearcher` pools its
+    /// seen set with `NavigateToSearchResultComparer`, which collapses results by file path and span.
+    let cache = ConcurrentDictionary<NavigableItemsKey, NavigableItemsEntry>()
 
-    /// Whether the file's parse depends on the defines, by file path: known once any instance has parsed it.
-    let conditionalDirectives =
-        ConcurrentDictionary<string, bool>(StringComparer.OrdinalIgnoreCase)
+    /// The key for a parse that does not depend on the defines. Not a define set any instance can have,
+    /// since defines are identifiers — an instance with none of its own must not read this entry as its own.
+    [<Literal>]
+    let AnyDefines = "?"
 
     do
         match workspace with
@@ -48,27 +63,50 @@ type internal FSharpNavigableItemsCache
         | workspace ->
             workspace.WorkspaceChanged.Add(fun e ->
                 if e.NewSolution.Id <> e.OldSolution.Id then
-                    cache.Clear()
-                    conditionalDirectives.Clear())
+                    cache.Clear())
 
-    let hasConditionalDirectives (parseTree: ParsedInput) =
+    let dependsOnDefines (parseTree: ParsedInput) =
         match parseTree with
         | ParsedInput.ImplFile file -> not file.Trivia.ConditionalDirectives.IsEmpty
         | ParsedInput.SigFile file -> not file.Trivia.ConditionalDirectives.IsEmpty
 
+    let definesOf (document: Document) =
+        document.GetFSharpQuickDefines() |> String.concat ";"
+
+    /// The entry for the file, from the parse every instance shares when it has no directives, otherwise from
+    /// the one parsed with this instance's defines. `matchesVersion` is false for the caller that takes the
+    /// last parse whatever version it came from.
+    let tryCached (document: Document) matchesVersion =
+        match document.FilePath with
+        | null -> ValueNone
+        | path ->
+            let entry defines =
+                match cache.TryGetValue({ Defines = defines; FilePath = path }) with
+                | true, entry when matchesVersion entry.Version -> ValueSome entry
+                | _ -> ValueNone
+
+            match entry AnyDefines with
+            | ValueSome entry -> ValueSome entry
+            | ValueNone -> entry (definesOf document)
+
     let store (document: Document) version approximate (parseTree: ParsedInput) =
         let items = NavigateTo.GetNavigableItems parseTree
 
-        cache[document.Id] <-
-            struct {|
-                Version = version
-                Approximate = approximate
-                Items = items
-            |}
-
         match document.FilePath with
         | null -> ()
-        | path -> conditionalDirectives[path] <- hasConditionalDirectives parseTree
+        | path ->
+            let defines =
+                if dependsOnDefines parseTree then
+                    definesOf document
+                else
+                    AnyDefines
+
+            cache[{ Defines = defines; FilePath = path }] <-
+                {
+                    Version = version
+                    Approximate = approximate
+                    Items = items
+                }
 
         items
 
@@ -77,8 +115,8 @@ type internal FSharpNavigableItemsCache
             let! ct = CancellableTask.getCancellationToken ()
             let! currentVersion = document.GetTextVersionAsync(ct)
 
-            match cache.TryGetValue document.Id with
-            | true, entry when entry.Version = currentVersion && not entry.Approximate -> return entry.Items
+            match tryCached document ((=) currentVersion) with
+            | ValueSome entry when not entry.Approximate -> return entry.Items
             | _ ->
                 let! parseResults = document.GetFSharpParseResultsAsync(nameof (FSharpNavigableItemsCache))
                 return store document currentVersion false parseResults.ParseTree
@@ -92,26 +130,17 @@ type internal FSharpNavigableItemsCache
             let! ct = CancellableTask.getCancellationToken ()
             let! currentVersion = document.GetTextVersionAsync(ct)
 
-            match cache.TryGetValue document.Id with
-            | true, entry when entry.Version = currentVersion -> return entry.Items
-            | _ ->
+            match tryCached document ((=) currentVersion) with
+            | ValueSome entry -> return entry.Items
+            | ValueNone ->
                 let! parseResults = document.GetFSharpQuickParseResultsAsync(nameof (FSharpNavigableItemsCache))
                 return store document currentVersion true parseResults.ParseTree
         }
 
     /// The items of the document's last parse, whatever version they came from. Reads no text, so a
     /// closed document costs nothing; a caller that needs the items of the current text asks for them.
-    member _.TryGetCachedNavigableItems(documentId: DocumentId) =
-        match cache.TryGetValue documentId with
-        | true, entry -> ValueSome entry.Items
-        | _ -> ValueNone
-
-    /// Whether the file's parse tree, from whichever instance parsed it first, has `#if` directives.
-    /// `true` when unknown, so a file no instance has parsed yet is searched everywhere.
-    member _.HasConditionalDirectives(filePath: string) =
-        match conditionalDirectives.TryGetValue filePath with
-        | true, dependsOnDefines -> dependsOnDefines
-        | _ -> true
+    member _.TryGetCachedNavigableItems(document: Document) =
+        tryCached document (fun _ -> true) |> ValueOption.map _.Items
 
     member _.CreateMatcherFor(searchPattern: string) =
         let patternMatcher =
@@ -143,31 +172,6 @@ type internal FSharpNavigableItemsCache
 
 [<Export(typeof<IFSharpNavigateToSearchService>); Shared>]
 type internal FSharpNavigateToSearchService [<ImportingConstructor>] (itemsCache: FSharpNavigableItemsCache) =
-
-    /// A multi-targeted project is one Roslyn project per target framework over the same files. The
-    /// first instance in the solution searches every file; the others only the files they alone compile
-    /// and the files whose parse depends on the defines.
-    let searchedIn (project: Project) =
-        match project.FilePath with
-        | null -> fun (_: Document) -> true
-        | projectPath ->
-            let instances =
-                project.Solution.Projects
-                |> Seq.filter (fun p -> p.FilePath = projectPath)
-                |> Seq.map _.Id
-                |> Seq.toArray
-
-            fun (document: Document) ->
-                match document.FilePath with
-                | null -> true
-                | path ->
-                    let documentIds = project.Solution.GetDocumentIdsWithFilePath path
-
-                    let owner =
-                        instances
-                        |> Array.find (fun id -> documentIds |> Seq.exists (fun documentId -> documentId.ProjectId = id))
-
-                    owner = project.Id || itemsCache.HasConditionalDirectives path
 
     let kindsProvided =
         ImmutableHashSet.Create(
@@ -294,7 +298,6 @@ type internal FSharpNavigateToSearchService [<ImportingConstructor>] (itemsCache
 
             let! results =
                 project.Documents
-                |> Seq.filter (searchedIn project)
                 |> Seq.map (processDocument itemsCache.GetNavigableItems tryMatch kinds)
                 // Throttle to avoid launching a parse per document in the project all at once.
                 |> CancellableTask.whenAllThrottled (max 1 Environment.ProcessorCount)
@@ -362,7 +365,6 @@ type internal FSharpNavigateToSearchService [<ImportingConstructor>] (itemsCache
                 cancellableTask {
                     do!
                         project.Documents
-                        |> Seq.filter (searchedIn project)
                         |> prioritize isPriority
                         |> CancellableTask.forEachThrottled Environment.ProcessorCount searchDocumentWhileLoading
 
