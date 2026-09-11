@@ -386,4 +386,10 @@ Use live (unsaved) buffers for analysis</value>
   <data name="ObjectBrowserMemberOf" xml:space="preserve">
     <value>Member of {0}</value>
   </data>
+  <data name="InsertSnippet" xml:space="preserve">
+    <value>Insert Snippet</value>
+  </data>
+  <data name="SurroundWith" xml:space="preserve">
+    <value>Surround With</value>
+  </data>
 </root>
