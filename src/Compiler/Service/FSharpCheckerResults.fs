@@ -69,21 +69,21 @@ type DelayedILModuleReader =
     val private name: string
     val private gate: obj
     val mutable private getStream: (CancellationToken -> Stream option)
-    val mutable private result: ILModuleReader
+    val mutable private result: ILModuleReader | null
 
     new(name, getStream) =
         {
             name = name
             gate = obj ()
             getStream = getStream
-            result = Unchecked.defaultof<_>
+            result = null
         }
 
     member this.OutputFile = this.name
 
     member this.TryGetILModuleReader() =
         // fast path
-        match box this.result with
+        match this.result with
         | null ->
             cancellable {
                 let! ct = Cancellable.token ()
@@ -91,7 +91,7 @@ type DelayedILModuleReader =
                 return
                     lock this.gate (fun () ->
                         // see if we have a result or not after the lock so we do not evaluate the stream more than once
-                        match box this.result with
+                        match this.result with
                         | null ->
                             try
                                 let streamOpt = this.getStream ct
@@ -114,9 +114,9 @@ type DelayedILModuleReader =
                             with ex ->
                                 Trace.TraceInformation("FCS: Unable to get an ILModuleReader: {0}", ex)
                                 None
-                        | _ -> Some this.result)
+                        | result -> Some result)
             }
-        | _ -> cancellable.Return(Some this.result)
+        | result -> cancellable.Return(Some result)
 
 [<RequireQualifiedAccess; NoComparison; CustomEquality>]
 type FSharpReferencedProject =
@@ -2392,7 +2392,7 @@ type internal TypeCheckInfo
 
                 let tip = PrintUtilities.squashToWidth width tip
 
-                let tip = LayoutRender.toArray tip
+                let tip = LayoutRender.toRichText tip
                 ToolTipText.ToolTipText [ ToolTipElement.Single(tip, FSharpXmlDoc.None) ]
 
             | [] ->
@@ -2415,7 +2415,7 @@ type internal TypeCheckInfo
                             for line in lines ->
                                 let tip = wordL (TaggedText.tagStringLiteral line)
                                 let tip = PrintUtilities.squashToWidth width tip
-                                let tip = LayoutRender.toArray tip
+                                let tip = LayoutRender.toRichText tip
                                 ToolTipElement.Single(tip, FSharpXmlDoc.None)
                         ]
 
@@ -2741,8 +2741,8 @@ type internal TypeCheckInfo
                                     None
                                 else
                                     match tr.TypeReprInfo, tr.PublicPath with
-                                    | TILObjectRepr(TILObjectReprData(ILScopeRef.Assembly assemblyRef, _, _)), Some(PubPath parts) ->
-                                        let fullName = parts |> String.concat "."
+                                    | TILObjectRepr(TILObjectReprData(ILScopeRef.Assembly assemblyRef, _, _)), ValueSome pubpath ->
+                                        let fullName = pubpath.FullPath |> String.concat "."
                                         Some(FindDeclResult.ExternalDecl(assemblyRef.Name, FindDeclExternalSymbol.Type fullName))
                                     | _ -> None
                             | _ -> None
@@ -2960,7 +2960,7 @@ module internal ParseAndCheckFile =
             //    the formatting of types in it may change (for example, 'a to obj)
             //
             // So we'll create a diagnostic later, but cache the FormatCore message now
-            diagnostic.Exception.Data["CachedFormatCore"] <- diagnostic.FormatCore(flatErrors, suggestNamesForErrors)
+            diagnostic.Exception.Data["CachedFormatCore"] <- diagnostic.FormatRichCore(flatErrors, suggestNamesForErrors)
             diagnosticsCollector.Add(diagnostic)
 
             if diagnostic.Severity = FSharpDiagnosticSeverity.Error then
@@ -3510,7 +3510,7 @@ type FSharpCheckFileResults
                     match Tokenization.FSharpKeywords.KeywordsDescriptionLookup kw with
                     | None -> ()
                     | Some kwDescription ->
-                        let kwText = kw |> TaggedText.tagKeyword |> wordL |> LayoutRender.toArray
+                        let kwText = kw |> TaggedText.tagKeyword |> wordL |> LayoutRender.toRichText
                         yield ToolTipElement.Single(kwText, FSharpXmlDoc.FromXmlText(Xml.XmlDoc([| kwDescription |], range0)))
             ]
 
@@ -3946,7 +3946,8 @@ type FSharpCheckProjectResults
         let optEnv0 = GetInitialOptimizationEnv(tcImports, tcGlobals)
         let tcConfig = getTcConfig ()
         let isIncrementalFragment = false
-        let tcVal = LightweightTcValForUsingInBuildMethodCall tcGlobals
+        // traitCtxtNone: checker results API — post-typecheck, SRTP constraints already resolved (audited for RFC FS-1043)
+        let tcVal = LightweightTcValForUsingInBuildMethodCall tcGlobals traitCtxtNone
 
         let optimizedImpls, _optimizationData, _ =
             ApplyAllOptimizations(tcConfig, tcGlobals, tcVal, outfile, importMap, isIncrementalFragment, optEnv0, thisCcu, mimpls)

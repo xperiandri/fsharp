@@ -109,13 +109,13 @@ let lexemeTrimRightToInt32 args lexbuf n =
 
 let checkExprOp (lexbuf:UnicodeLexing.Lexbuf) =
     if lexbuf.LexemeContains ':' then
-        deprecatedWithError (FSComp.SR.lexCharNotAllowedInOperatorNames(":")) lexbuf.LexemeRange
+        deprecatedWithError (FSComp.SR.lexCharNotAllowedInOperatorNames(RichText.mkOperator ":")) lexbuf.LexemeRange
     if lexbuf.LexemeContains '$' then
-        deprecatedWithError (FSComp.SR.lexCharNotAllowedInOperatorNames("$")) lexbuf.LexemeRange
+        deprecatedWithError (FSComp.SR.lexCharNotAllowedInOperatorNames(RichText.mkOperator "$")) lexbuf.LexemeRange
         
 let checkExprGreaterColonOp (lexbuf:UnicodeLexing.Lexbuf) =
     if lexbuf.LexemeContains '$' then
-        deprecatedWithError (FSComp.SR.lexCharNotAllowedInOperatorNames("$")) lexbuf.LexemeRange
+        deprecatedWithError (FSComp.SR.lexCharNotAllowedInOperatorNames(RichText.mkOperator "$")) lexbuf.LexemeRange
 
 let unexpectedChar lexbuf =
     LEX_FAILURE (FSComp.SR.lexUnexpectedChar(lexeme lexbuf))
@@ -290,9 +290,7 @@ let bignum =  integer ('I'  | 'N' | 'Z' | 'Q' | 'R' | 'G')
 
 let ieee64 = float
 
-let ieee32 = float ('f' | 'F')
-
-let ieee32_dotless_no_exponent = integer ('f' | 'F')
+let ieee32 = (float | integer) ('f' | 'F')
 
 let decimal = (float | integer) ('m' | 'M')
 
@@ -476,13 +474,6 @@ rule token (args: LexArgs) (skip: bool) = parse
  | ieee32
      { IEEE32 (evalFloat args lexbuf) }
 
- | ieee32_dotless_no_exponent
-     { if lexbuf.SupportsFeature LanguageFeature.DotlessFloat32Literal then
-          IEEE32 (evalFloat args lexbuf)
-       else
-          fail args lexbuf (FSComp.SR.lexInvalidFloat()) (IEEE32 0.0f)
-     }
-
  | ieee64
      { IEEE64 (try float(lexeme lexbuf) with _ -> fail args lexbuf (FSComp.SR.lexInvalidFloat()) 0.0) }
 
@@ -620,24 +611,16 @@ rule token (args: LexArgs) (skip: bool) = parse
  | ('$'+) '"' '"' '"'
      { let buf, fin, m = startString args lexbuf
 
-       if lexbuf.SupportsFeature LanguageFeature.ExtendedStringInterpolation then
-           // Single quote in triple quote ok, others disallowed
-           match args.stringNest with
-           | _ :: _ -> errorR(Error(FSComp.SR.lexTripleQuoteInTripleQuote(), m))
-           | [] -> ()
+       // Single quote in triple quote ok, others disallowed
+       match args.stringNest with
+       | _ :: _ -> errorR(Error(FSComp.SR.lexTripleQuoteInTripleQuote(), m))
+       | [] -> ()
 
-           args.interpolationDelimiterLength <- lexeme lexbuf |> Seq.takeWhile (fun c -> c = '$') |> Seq.length
-           if not skip then
-               STRING_TEXT (LexCont.String(args.ifdefStack, args.stringNest, LexerStringStyle.ExtendedInterpolated, LexerStringKind.InterpolatedStringFirst, args.interpolationDelimiterLength, m))
-           else
-               extendedInterpolatedString (buf, fin, m, LexerStringKind.InterpolatedStringFirst, args) skip lexbuf
+       args.interpolationDelimiterLength <- lexeme lexbuf |> Seq.takeWhile (fun c -> c = '$') |> Seq.length
+       if not skip then
+           STRING_TEXT (LexCont.String(args.ifdefStack, args.stringNest, LexerStringStyle.ExtendedInterpolated, LexerStringKind.InterpolatedStringFirst, args.interpolationDelimiterLength, m))
        else
-           let result =
-             if not skip then
-                 STRING_TEXT (LexCont.String(args.ifdefStack, args.stringNest, LexerStringStyle.TripleQuote, LexerStringKind.InterpolatedStringFirst, args.interpolationDelimiterLength, m))
-             else
-                 tripleQuoteString (buf, fin, m, LexerStringKind.InterpolatedStringFirst, args) skip lexbuf
-           fail args lexbuf (FSComp.SR.lexExtendedStringInterpolationNotSupported()) result
+           extendedInterpolatedString (buf, fin, m, LexerStringKind.InterpolatedStringFirst, args) skip lexbuf
      }
 
  | '$' '"'
@@ -753,6 +736,12 @@ rule token (args: LexArgs) (skip: bool) = parse
  | "````" | "```" | "``" | "`"
      { errorR(Error(FSComp.SR.lexInvalidIdentifier(), lexbuf.LexemeRange))
        Keywords.IdentifierToken args lexbuf "" }
+
+ | "#:" anystring
+     { let m = lexbuf.LexemeRange
+       shouldStartLine args lexbuf m (FSComp.SR.lexColonDirectiveMustBeFirst())
+       if not skip then WHITESPACE (LexCont.Token(args.ifdefStack, args.stringNest))
+       else endline LexerEndlineContinuation.Token args skip lexbuf }
 
  | ('#' anywhite* | "#line" anywhite+ ) digit+ anywhite* ('@'? "\"" [^'\n''\r''"']+ '"')? anywhite* newline
      {  let pos = lexbuf.EndPos
@@ -1007,7 +996,7 @@ rule token (args: LexArgs) (skip: bool) = parse
    { // Treat shebangs like regular comments, but they are only allowed at the start of a file
        let m = lexbuf.LexemeRange
        let tok = LINE_COMMENT (LexCont.SingleLineComment(args.ifdefStack, args.stringNest, 1, m))
-       let tok = shouldStartFile args lexbuf m (0,FSComp.SR.lexHashBangMustBeFirstInFile()) tok
+       let tok = shouldStartFile args lexbuf m (0, RichText.mkText (FSComp.SR.lexHashBangMustBeFirstInFile())) tok
        if not skip then tok else singleLineComment (None,1,m,m,args) skip lexbuf }
 
 | "#light" anywhite* newline

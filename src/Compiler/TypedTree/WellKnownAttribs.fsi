@@ -56,6 +56,7 @@ type internal WellKnownEntityAttributes =
     | EditorBrowsableAttribute = (1uL <<< 46)
     | CompiledNameAttribute = (1uL <<< 47)
     | DebuggerDisplayAttribute = (1uL <<< 48)
+    | ExtendedLayoutAttribute = (1uL <<< 49)
     | NotComputed = (1uL <<< 63)
 
 /// Flags enum for well-known assembly-level attributes.
@@ -115,6 +116,7 @@ type internal WellKnownValAttributes =
     | ValueAsStaticPropertyAttribute = (1uL <<< 39)
     | TailCallAttribute = (1uL <<< 40)
     | NotNullIfNotNullAttribute = (1uL <<< 41)
+    | OverloadResolutionPriorityAttribute = (1uL <<< 42)
     | NotComputed = (1uL <<< 63)
 
 module internal Flags =
@@ -139,9 +141,7 @@ type internal WellKnownAttribs<'TItem, 'TFlags when 'TFlags: enum<uint64>> =
     new: attribs: 'TItem list * flags: 'TFlags -> WellKnownAttribs<'TItem, 'TFlags>
     member AsList: unit -> 'TItem list
     member Flags: 'TFlags
+    member NeedsCompute: bool
     member HasWellKnownAttribute: flag: 'TFlags -> bool
     member Add: attrib: 'TItem * flag: 'TFlags -> WellKnownAttribs<'TItem, 'TFlags>
     member WithRecomputedFlags: unit -> WellKnownAttribs<'TItem, 'TFlags>
-
-    member CheckFlag:
-        flag: 'TFlags * compute: ('TItem list -> 'TFlags) -> struct (bool * WellKnownAttribs<'TItem, 'TFlags> * bool)
