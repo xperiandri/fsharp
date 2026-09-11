@@ -49,6 +49,7 @@
     <Compile Include="MultiTargetNavigateToSearchTests.fs" />
     <Compile Include="MultiTargetFindReferencesTests.fs" />
     <Compile Include="NavigateToSearchWhileLoadingTests.fs" />
+    <Compile Include="NavigateToPersistentCacheTests.fs" />
     <Compile Include="CodeFixes\CodeFixTestFramework.fs" />
     <Compile Include="CodeFixes\AddInstanceMemberParameterTests.fs" />
     <Compile Include="CodeFixes\ConvertToAnonymousRecordTests.fs" />
