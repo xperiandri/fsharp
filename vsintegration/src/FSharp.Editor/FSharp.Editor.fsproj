@@ -109,6 +109,8 @@
     <Compile Include="Navigation\NavigableItemsIndex.fs" />
     <Compile Include="Navigation\NavigateToSearchService.fs" />
     <Compile Include="Navigation\CrossLanguageSymbolNavigation.fs" />
+    <Compile Include="Navigation\InheritanceSites.fs" />
+    <Compile Include="Navigation\FindImplementations.fs" />
     <Compile Include="Navigation\ClassifiedReferenceLine.fs" />
     <Compile Include="Navigation\FindUsagesService.fs" />
     <Compile Include="Navigation\FindDefinitionService.fs" />

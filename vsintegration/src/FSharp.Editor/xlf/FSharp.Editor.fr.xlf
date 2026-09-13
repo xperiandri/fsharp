@@ -147,6 +147,11 @@ Suggérer des noms pour les identificateurs non résolus ;</target>
         <target state="translated">Implémenter l'interface sans annotation de type</target>
         <note />
       </trans-unit>
+      <trans-unit id="ImplementationsOf">
+        <source>'{0}' implementations</source>
+        <target state="new">'{0}' implementations</target>
+        <note>Title of the Go To Implementation results, as C# titles them. {0} is the name of the symbol.</note>
+      </trans-unit>
       <trans-unit id="InsertSnippet">
         <source>Insert Snippet</source>
         <target state="new">Insert Snippet</target>
