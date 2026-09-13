@@ -23,3 +23,14 @@ module internal ProjectFiltering =
                     String.Equals(refFileName, assemblyFileName, StringComparison.OrdinalIgnoreCase)
                 | _ -> false))
         |> Seq.toList
+
+    /// The C# and Visual Basic projects referencing an assembly: an F# project has no compilation Roslyn can search.
+    let getCompilationProjectsReferencingAssembly (assemblyFilePath: string) (solution: Solution) =
+        getProjectsReferencingAssembly assemblyFilePath solution
+        |> List.filter (fun project -> not project.IsFSharp && project.SupportsCompilation)
+
+    /// The C# and Visual Basic projects referencing the assembly a project builds.
+    let getCompilationProjectsReferencingOutputOf (project: Project) =
+        match project.OutputFilePath with
+        | null -> []
+        | outputFilePath -> getCompilationProjectsReferencingAssembly outputFilePath project.Solution
