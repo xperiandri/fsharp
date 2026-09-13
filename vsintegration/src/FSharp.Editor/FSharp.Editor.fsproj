@@ -50,6 +50,7 @@
     <Compile Include="Common\FSharpCodeAnalysisExtensions.fs" />
     <Compile Include="Common\CodeAnalysisExtensions.fs" />
     <Compile Include="Common\Vs.fs" />
+    <Compile Include="Common\ActiveDocumentTracker.fs" />
     <Compile Include="Options\SettingsStore.fs" />
     <Compile Include="Options\UIHelpers.fs" />
     <Compile Include="Options\EditorOptions.fs" />
@@ -111,7 +112,6 @@
     <Compile Include="Navigation\CrossLanguageSymbolNavigation.fs" />
     <Compile Include="Navigation\FindUsagesService.fs" />
     <Compile Include="Navigation\FindDefinitionService.fs" />
-    <Compile Include="Copilot\ActiveDocumentTracker.fs" />
     <Compile Include="Copilot\CopilotSymbolMapping.fs" />
     <Compile Include="Copilot\CopilotSymbolSnippets.fs" />
     <Compile Include="Copilot\CopilotContextProvider.fs" />
