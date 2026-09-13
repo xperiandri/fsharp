@@ -400,5 +400,10 @@ Use live (unsaved) buffers for analysis</value>
   <data name="ImplementationsOf" xml:space="preserve">
     <value>'{0}' implementations</value>
     <comment>Title of the Go To Implementation results, as C# titles them. {0} is the name of the symbol.</comment>
+  <data name="ConvertToShorthandLambda" xml:space="preserve">
+    <value>Convert to '_.' shorthand lambda</value>
+  </data>
+  <data name="ConvertToFunLambda" xml:space="preserve">
+    <value>Convert to 'fun' lambda</value>
   </data>
 </root>
