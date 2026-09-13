@@ -345,7 +345,9 @@ type internal FSharpNavigateToSearchService [<ImportingConstructor>] (itemsCache
                                             ImmutableArray.Create(TaggedText(TextTags.Text, item.Name)),
                                             document,
                                             sourceSpan
-                                        )
+                                        ),
+                                        item.ParameterCount,
+                                        item.TypeParameterCount
                                     )
                     |]
                     |> ImmutableArray.CreateRange
