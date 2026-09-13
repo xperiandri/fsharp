@@ -26,7 +26,7 @@ let PersistenceName = "FSharpNavigableItemsIndex"
 let private formatChecksum =
     FSharpChecksum.Create
         [
-            "1"
+            "2"
             typeof<NavigableItem>.Assembly.ManifestModule.ModuleVersionId.ToString()
         ]
 
@@ -133,6 +133,8 @@ let private write (writer: BinaryWriter) (items: NavigableItem array) =
         writer.Write item.Range.StartColumn
         writer.Write item.Range.EndLine
         writer.Write item.Range.EndColumn
+        writer.Write item.ParameterCount
+        writer.Write item.TypeParameterCount
 
     writer.Write EndTag
 
@@ -167,6 +169,8 @@ let private read (reader: BinaryReader) =
         let fileName = reader.ReadString()
         let start = Position.mkPos (reader.ReadInt32()) (reader.ReadInt32())
         let finish = Position.mkPos (reader.ReadInt32()) (reader.ReadInt32())
+        let parameterCount = reader.ReadInt32()
+        let typeParameterCount = reader.ReadInt32()
 
         {
             Name = name
@@ -175,6 +179,8 @@ let private read (reader: BinaryReader) =
             IsSignature = isSignature
             Kind = kind
             Container = itemContainer
+            ParameterCount = parameterCount
+            TypeParameterCount = typeParameterCount
         }
 
     let mutable finished = false
