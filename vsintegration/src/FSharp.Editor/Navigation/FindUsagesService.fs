@@ -10,6 +10,7 @@ open System.Threading.Tasks
 
 open Microsoft.CodeAnalysis
 open Microsoft.CodeAnalysis.ExternalAccess.FSharp
+open Microsoft.CodeAnalysis.ExternalAccess.FSharp.Classification
 open Microsoft.CodeAnalysis.ExternalAccess.FSharp.FindUsages
 open Microsoft.CodeAnalysis.ExternalAccess.FSharp.Editor.FindUsages
 open Microsoft.CodeAnalysis.FindSymbols
@@ -36,6 +37,7 @@ module FSharpFindUsagesService =
         cancellableTask {
             let! cancellationToken = CancellableTask.getCancellationToken ()
             let! sourceText = doc.GetTextAsync(cancellationToken)
+            let classifier = FSharpClassificationService() :> IFSharpClassificationService
 
             let definitionItem =
                 if isExternal then
@@ -55,11 +57,20 @@ module FSharpFindUsagesService =
                 | _, ValueSome textSpan ->
                     match textSpan with
                     | Tokenizer.FixedSpan sourceText symbolName fixedSpan ->
-                        let referenceItem =
-                            FSharpSourceReferenceItem(definitionItem, FSharpDocumentSpan(doc, fixedSpan))
                         // REVIEW: OnReferenceFoundAsync is throwing inside Roslyn, putting a try/with so find-all refs doesn't fail.
                         try
-                            do! onReferenceFoundAsync referenceItem
+                            let! struct (classifiedSpans, highlightSpan) =
+                                ClassifiedReferenceLine.classifyAsync classifier doc sourceText fixedSpan
+
+                            do!
+                                onReferenceFoundAsync (
+                                    FSharpSourceReferenceItem(
+                                        definitionItem,
+                                        FSharpDocumentSpan(doc, fixedSpan),
+                                        classifiedSpans,
+                                        highlightSpan
+                                    )
+                                )
                         with error when not (error :? OperationCanceledException) ->
                             ()
                     | _ -> ()

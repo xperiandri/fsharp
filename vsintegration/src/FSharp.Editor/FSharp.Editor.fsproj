@@ -109,6 +109,7 @@
     <Compile Include="Navigation\NavigableItemsIndex.fs" />
     <Compile Include="Navigation\NavigateToSearchService.fs" />
     <Compile Include="Navigation\CrossLanguageSymbolNavigation.fs" />
+    <Compile Include="Navigation\ClassifiedReferenceLine.fs" />
     <Compile Include="Navigation\FindUsagesService.fs" />
     <Compile Include="Navigation\FindDefinitionService.fs" />
     <Compile Include="Copilot\ActiveDocumentTracker.fs" />
