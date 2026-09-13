@@ -128,6 +128,7 @@
     <Compile Include="Commands\HelpContextService.fs" />
     <Compile Include="Commands\FsiCommandService.fs" />
     <Compile Include="Commands\XmlDocCommandService.fs" />
+    <Compile Include="Commands\GoToDeclarationCommandService.fs" />
     <Compile Include="Snippets\SnippetIndentation.fs" />
     <Compile Include="Snippets\SnippetFunctions.fs" />
     <Compile Include="Snippets\SnippetExpansionClient.fs" />

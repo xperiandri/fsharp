@@ -458,7 +458,7 @@ type internal GoToDefinition(metadataAsSource: FSharpMetadataAsSourceService) =
                 | _ -> return ValueNone
         }
 
-    member internal this.FindDefinitionAtPosition(originDocument: Document, position: int) =
+    member private this.FindAtPosition(originDocument: Document, position: int, preferSignature: bool, counterpartAtCaret: bool) =
         cancellableTask {
             let userOpName = "FindDefinitionAtPosition"
             let! cancellationToken = CancellableTask.getCancellationToken ()
@@ -468,7 +468,6 @@ type internal GoToDefinition(metadataAsSource: FSharpMetadataAsSourceService) =
             let textLineString = textLine.ToString()
             let fcsTextLineNumber = Line.fromZ textLinePos.Line
             let lineText = (sourceText.Lines.GetLineFromPosition position).ToString()
-            let preferSignature = isSignatureFile originDocument.FilePath
 
             let! lexerSymbol = originDocument.TryFindFSharpLexerSymbolAsync(position, SymbolLookupKind.Greedy, false, false, userOpName)
 
@@ -531,16 +530,19 @@ type internal GoToDefinition(metadataAsSource: FSharpMetadataAsSourceService) =
                             // No document for the file anywhere in the workspace: the symbol comes from an assembly.
                             let metadataReferences = originDocument.Project.MetadataReferences
                             return ValueSome(FSharpGoToDefinitionResult.ExternalAssembly(targetSymbolUse, metadataReferences), idRange)
-                        | ValueSome _ when lexerSymbol.Range = targetRange ->
+                        | ValueSome targetDocument when lexerSymbol.Range = targetRange ->
                             let! navItem =
-                                this.FindCounterpartOfDeclarationAtCaret(
-                                    originDocument,
-                                    targetSymbolUse,
-                                    checkFileResults,
-                                    lexerSymbol,
-                                    fcsTextLineNumber,
-                                    textLineString
-                                )
+                                if counterpartAtCaret then
+                                    this.FindCounterpartOfDeclarationAtCaret(
+                                        originDocument,
+                                        targetSymbolUse,
+                                        checkFileResults,
+                                        lexerSymbol,
+                                        fcsTextLineNumber,
+                                        textLineString
+                                    )
+                                else
+                                    navigableItemAt targetDocument targetRange
 
                             return
                                 navItem
@@ -567,6 +569,16 @@ type internal GoToDefinition(metadataAsSource: FSharpMetadataAsSourceService) =
                                 |> ValueOption.map (fun navItem -> FSharpGoToDefinitionResult.NavigableItem navItem, idRange)
                     | _ -> return ValueNone
         }
+
+    /// Go To Definition: from an implementation file the definition, from a signature file the declaration; at either
+    /// of them, the other one.
+    member internal this.FindDefinitionAtPosition(originDocument: Document, position: int) =
+        this.FindAtPosition(originDocument, position, isSignatureFile originDocument.FilePath, true)
+
+    /// Go To Declaration: the declaration in the signature file when there is one, otherwise the definition; at a
+    /// declaration, the declaration itself.
+    member internal this.FindDeclarationAtPosition(originDocument: Document, position: int) =
+        this.FindAtPosition(originDocument, position, true, false)
 
     /// find the declaration location (signature file/.fsi) of the target symbol if possible, fall back to definition
     member this.FindDeclarationOfSymbolAtRange(targetDocument: Document, symbolRange: range, targetSource: SourceText) =

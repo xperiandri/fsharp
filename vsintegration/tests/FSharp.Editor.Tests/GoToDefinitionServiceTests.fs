@@ -259,3 +259,55 @@ let f_IWSAM_flex_StaticProperty(x: #IStaticProperty<'T>) =
         match symbolUse.GetSymbolScope StaleSnapshot.appDocument with
         | Some(SymbolScope.Projects(projects, _)) -> Assert.Contains(StaleSnapshot.library.Name, projects |> List.map _.Name)
         | scope -> failwith $"expected a project scope, got %A{scope}"
+
+    /// A value declared in a signature file, then defined and used in its implementation file.
+    let private signatureAndImplementation () =
+        match
+            RoslynTestHelpers.GetFsiAndFsDocuments
+                "module Test\n\nval add: x: int -> y: int -> int\n"
+                "module Test\n\nlet add x y = x + y\n\nlet three = add 1 2\n"
+            |> List.ofSeq
+        with
+        | [ signature; implementation ] -> signature, implementation
+        | documents -> failwith $"expected a signature and an implementation, got %d{documents.Length} documents"
+
+    /// The extension of the file Go To Declaration opens from `offset` into the first `marker` of the document, and the
+    /// line it opens at, with the span between bars.
+    let private declarationAt (document: Document) (marker: string) offset =
+        let text = document.GetTextAsync(CancellationToken.None).Result
+        let position = text.ToString().IndexOf(marker, StringComparison.Ordinal) + offset
+
+        match
+            GoToDefinition(FSharpMetadataAsSourceService()).FindDeclarationAtPosition(document, position)
+            |> CancellableTask.runSynchronouslyWithoutCancellation
+        with
+        | ValueSome(FSharpGoToDefinitionResult.NavigableItem item, _) ->
+            let target = item.Document.GetTextAsync(CancellationToken.None).Result
+            let line = target.Lines.GetLineFromPosition(item.SourceSpan.Start)
+            let start = item.SourceSpan.Start - line.Start
+
+            let marked =
+                line.ToString().Insert(start + item.SourceSpan.Length, "|").Insert(start, "|")
+
+            System.IO.Path.GetExtension item.Document.FilePath, marked
+        | result -> failwith $"expected a navigable item, got %A{result}"
+
+    [<Theory>]
+    [<InlineData("add 1 2", 0)>]
+    [<InlineData("let add", 4)>]
+    let ``go to declaration from an implementation file opens the declaration in its signature file`` (marker: string, offset: int) =
+        let _, implementation = signatureAndImplementation ()
+        Assert.Equal((".fsi", "val |add|: x: int -> y: int -> int"), declarationAt implementation marker offset)
+
+    [<Fact>]
+    let ``go to declaration on a declaration in a signature file stays on it`` () =
+        let signature, _ = signatureAndImplementation ()
+        Assert.Equal((".fsi", "val |add|: x: int -> y: int -> int"), declarationAt signature "add" 0)
+
+    [<Fact>]
+    let ``go to declaration in a file without a signature opens the definition`` () =
+        let document =
+            RoslynTestHelpers.CreateSolution("let add x y = x + y\n\nlet three = add 1 2\n")
+            |> RoslynTestHelpers.GetSingleDocument
+
+        Assert.Equal((".fs", "let |add| x y = x + y"), declarationAt document "add 1 2" 0)
