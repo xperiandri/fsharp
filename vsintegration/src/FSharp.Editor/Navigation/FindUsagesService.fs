@@ -99,13 +99,6 @@ module FSharpFindUsagesService =
                 return spans |> Array.choose id
             }
 
-    let private referencingCompilationProjects (declaringProject: Project) =
-        match declaringProject.OutputFilePath with
-        | null -> []
-        | outputFilePath ->
-            ProjectFiltering.getProjectsReferencingAssembly outputFilePath declaringProject.Solution
-            |> List.filter (fun project -> not project.IsFSharp && project.SupportsCompilation)
-
     /// Locations in a C# or VB project of the symbol with the given documentation comment id.
     let private findRoslynReferences (docId: string) (project: Project) =
         cancellableTask {
@@ -142,7 +135,8 @@ module FSharpFindUsagesService =
     let private findCrossLanguageReferences (docId: string) (definitionItems: struct (FSharpDefinitionItem * Project) seq) =
         seq {
             for struct (definitionItem, declaringProject) in definitionItems do
-                for project in referencingCompilationProjects declaringProject -> struct (definitionItem, project)
+                for project in ProjectFiltering.getCompilationProjectsReferencingOutputOf declaringProject ->
+                    struct (definitionItem, project)
         }
         |> Seq.distinctBy (fun struct (_, project) -> project.Id)
         |> Seq.map (fun struct (definitionItem, project) ->
@@ -166,9 +160,8 @@ module FSharpFindUsagesService =
                     do! onReferenceFoundAsync (FSharpSourceReferenceItem(definitionItem, FSharpDocumentSpan(location.Document, span)))
         }
 
-    let findReferencedSymbolsAsync
-        (document: Document, position: int, context: IFSharpFindUsagesContext, allReferences: bool, userOp: string)
-        : CancellableTask<unit> =
+    /// The symbol under the caret, the check of its document and where the symbol is declared.
+    let private tryFindSymbolAtCaretAsync (document: Document, position: int, userOp: string) =
         cancellableTask {
             let! cancellationToken = CancellableTask.getCancellationToken ()
             let! sourceText = document.GetTextAsync(cancellationToken)
@@ -176,83 +169,162 @@ module FSharpFindUsagesService =
             let lineNumber = sourceText.Lines.GetLinePosition(position).Line + 1
 
             match! document.TryFindFSharpLexerSymbolAsync(position, SymbolLookupKind.Greedy, false, false, userOp) with
-            | None -> ()
+            | None -> return ValueNone
             | Some symbol ->
 
                 let! _, checkFileResults = document.GetFSharpParseAndCheckResultsAsync(userOp)
 
-                let symbolUse =
-                    checkFileResults.GetSymbolUseAtLocation(lineNumber, symbol.Ident.idRange.EndColumn, textLine, symbol.FullIsland)
-
-                let declaration =
-                    checkFileResults.GetDeclarationLocation(lineNumber, symbol.Ident.idRange.EndColumn, textLine, symbol.FullIsland, false)
-
-                match symbolUse with
-                | None -> ()
+                match checkFileResults.GetSymbolUseAtLocation(lineNumber, symbol.Ident.idRange.EndColumn, textLine, symbol.FullIsland) with
+                | None -> return ValueNone
                 | Some symbolUse ->
+                    let declaration =
+                        checkFileResults.GetDeclarationLocation(
+                            lineNumber,
+                            symbol.Ident.idRange.EndColumn,
+                            textLine,
+                            symbol.FullIsland,
+                            false
+                        )
 
-                    let tags =
-                        FSharpGlyphTags.GetTags(Tokenizer.GetGlyphForSymbol(symbolUse.Symbol, symbol.Kind))
+                    return
+                        ValueSome
+                            struct {|
+                                Symbol = symbol
+                                SymbolUse = symbolUse
+                                CheckFileResults = checkFileResults
+                                Declaration = declaration
+                            |}
+        }
 
-                    let declarationRange =
-                        match declaration with
-                        | FindDeclResult.DeclFound range -> ValueSome range
-                        | _ -> ValueNone
+    /// Reports where the symbol under the caret is declared: a definition item for each project declaring it, or one
+    /// that cannot be navigated to for a symbol from an assembly.
+    let private reportDeclarationsAsync
+        (document: Document)
+        (context: IFSharpFindUsagesContext)
+        (symbol: LexerSymbol)
+        (symbolUse: FSharp.Compiler.CodeAnalysis.FSharpSymbolUse)
+        declaration
+        =
+        cancellableTask {
+            let tags =
+                FSharpGlyphTags.GetTags(Tokenizer.GetGlyphForSymbol(symbolUse.Symbol, symbol.Kind))
 
-                    let! declarationSpans =
-                        match declarationRange with
-                        | ValueSome range -> rangeToDocumentSpans (document, range, symbol.Ident.idText)
-                        | ValueNone -> CancellableTask.singleton [||]
+            let declarationRange =
+                match declaration with
+                | FindDeclResult.DeclFound range -> ValueSome range
+                | _ -> ValueNone
 
-                    let declarationSpans =
-                        declarationSpans
-                        |> Array.distinctBy (fun x -> x.Document.FilePath, x.Document.Project.FilePath)
+            let! declarationSpans =
+                match declarationRange with
+                | ValueSome range -> rangeToDocumentSpans (document, range, symbol.Ident.idText)
+                | ValueNone -> CancellableTask.singleton [||]
 
-                    let isExternal = Array.isEmpty declarationSpans
+            let declarationSpans =
+                declarationSpans
+                |> Array.distinctBy (fun x -> x.Document.FilePath, x.Document.Project.FilePath)
 
-                    let displayParts =
-                        ImmutableArray.Create(Microsoft.CodeAnalysis.TaggedText(TextTags.Text, symbol.Ident.idText))
+            let isExternal = Array.isEmpty declarationSpans
 
-                    let originationParts =
-                        ImmutableArray.Create(Microsoft.CodeAnalysis.TaggedText(TextTags.Assembly, symbolUse.Symbol.Assembly.SimpleName))
+            let displayParts =
+                ImmutableArray.Create(Microsoft.CodeAnalysis.TaggedText(TextTags.Text, symbol.Ident.idText))
 
-                    let externalDefinitionItem =
-                        FSharpDefinitionItem.CreateNonNavigableItem(tags, displayParts, originationParts)
+            let originationParts =
+                ImmutableArray.Create(Microsoft.CodeAnalysis.TaggedText(TextTags.Assembly, symbolUse.Symbol.Assembly.SimpleName))
 
-                    let definitionItems =
-                        declarationSpans
-                        |> Array.map (fun span -> struct (FSharpDefinitionItem.Create(tags, displayParts, span), span.Document.Project))
+            let externalDefinitionItem =
+                FSharpDefinitionItem.CreateNonNavigableItem(tags, displayParts, originationParts)
+
+            let definitionItems =
+                declarationSpans
+                |> Array.map (fun span -> struct (FSharpDefinitionItem.Create(tags, displayParts, span), span.Document.Project))
+
+            do!
+                definitionItems
+                |> Seq.map (fun struct (definitionItem, _) -> context.OnDefinitionFoundAsync(definitionItem))
+                |> Task.WhenAll
+
+            if isExternal then
+                do! context.OnDefinitionFoundAsync(externalDefinitionItem)
+
+            return
+                struct {|
+                    DeclarationRange = declarationRange
+                    DefinitionItems = definitionItems
+                    ExternalDefinitionItem = externalDefinitionItem
+                    IsExternal = isExternal
+                |}
+        }
+
+    let findReferencedSymbolsAsync
+        (document: Document, position: int, context: IFSharpFindUsagesContext, userOp: string)
+        : CancellableTask<unit> =
+        cancellableTask {
+            match! tryFindSymbolAtCaretAsync (document, position, userOp) with
+            | ValueNone -> ()
+            | ValueSome caret ->
+                let! cancellationToken = CancellableTask.getCancellationToken ()
+
+                let! declarations = reportDeclarationsAsync document context caret.Symbol caret.SymbolUse caret.Declaration
+
+                let onFound =
+                    onSymbolFound
+                        declarations.DeclarationRange
+                        declarations.ExternalDefinitionItem
+                        declarations.DefinitionItems
+                        declarations.IsExternal
+                        caret.Symbol.Ident.idText
+                        context.OnReferenceFoundAsync
+
+                // Searched alongside the F# projects, reported after them.
+                let crossLanguageSearch =
+                    match caret.SymbolUse.Symbol.DocumentationCommentId with
+                    | ValueSome docId when not declarations.IsExternal && not caret.SymbolUse.Symbol.IsInternalToProject ->
+                        findCrossLanguageReferences docId declarations.DefinitionItems
+                    | _ -> Task.FromResult Seq.empty
+
+                do! SymbolHelpers.findSymbolUses caret.SymbolUse document caret.CheckFileResults onFound
+                let! found = crossLanguageSearch
+                do! reportCrossLanguageReferences found context.OnReferenceFoundAsync
+        }
+
+    /// Reports what implements the symbol under the caret, or where it is declared when nothing does.
+    let findImplementationsAsync
+        (document: Document, position: int, context: IFSharpFindUsagesContext, userOp: string)
+        : CancellableTask<unit> =
+        cancellableTask {
+            match! tryFindSymbolAtCaretAsync (document, position, userOp) with
+            | ValueNone -> ()
+            | ValueSome caret ->
+                let! cancellationToken = CancellableTask.getCancellationToken ()
+                do! context.SetSearchTitleAsync(String.Format(SR.ImplementationsOf(), caret.Symbol.Ident.idText))
+
+                let report (implementation: FindImplementations.Implementation) =
+                    cancellableTask {
+                        let displayParts =
+                            ImmutableArray.Create(Microsoft.CodeAnalysis.TaggedText(TextTags.Text, implementation.Name))
+
+                        let span = FSharpDocumentSpan(implementation.Document, implementation.Span)
+                        do! context.OnDefinitionFoundAsync(FSharpDefinitionItem.Create(implementation.Tags, displayParts, span))
+                    }
+
+                let declared =
+                    FindImplementations.tryDeclaredAt caret.SymbolUse caret.CheckFileResults cancellationToken
+
+                match! FindImplementations.findAsync (declared |> ValueOption.defaultValue caret.SymbolUse.Symbol) document report with
+                | 0 ->
+                    // At an override, the declaration found for the caret is the abstract member's.
+                    let declaration =
+                        match declared with
+                        | ValueSome declared ->
+                            match declared.ImplementationLocation with
+                            | Some range -> FindDeclResult.DeclFound range
+                            | None -> caret.Declaration
+                        | ValueNone -> caret.Declaration
 
                     do!
-                        definitionItems
-                        |> Seq.map (fun struct (definitionItem, _) -> context.OnDefinitionFoundAsync(definitionItem))
-                        |> Task.WhenAll
-
-                    if isExternal then
-                        do! context.OnDefinitionFoundAsync(externalDefinitionItem)
-
-                    // Find Implementations wants the definitions alone: reporting a use is what
-                    // `allReferences` gates, so searching for them would throw the whole search away.
-                    if allReferences then
-                        let onFound =
-                            onSymbolFound
-                                declarationRange
-                                externalDefinitionItem
-                                definitionItems
-                                isExternal
-                                symbol.Ident.idText
-                                context.OnReferenceFoundAsync
-
-                        // Searched alongside the F# projects, reported after them.
-                        let crossLanguageSearch =
-                            match symbolUse.Symbol.DocumentationCommentId with
-                            | ValueSome docId when not isExternal && not symbolUse.Symbol.IsInternalToProject ->
-                                findCrossLanguageReferences docId definitionItems
-                            | _ -> Task.FromResult Seq.empty
-
-                        do! SymbolHelpers.findSymbolUses symbolUse document checkFileResults onFound
-                        let! found = crossLanguageSearch
-                        do! reportCrossLanguageReferences found context.OnReferenceFoundAsync
+                        reportDeclarationsAsync document context caret.Symbol caret.SymbolUse declaration
+                        |> CancellableTask.ignore
+                | _ -> ()
         }
 
 open FSharpFindUsagesService
@@ -261,9 +333,9 @@ open FSharpFindUsagesService
 type internal FSharpFindUsagesService [<ImportingConstructor>] () =
     interface IFSharpFindUsagesService with
         member _.FindReferencesAsync(document, position, context) =
-            findReferencedSymbolsAsync (document, position, context, true, nameof (FSharpFindUsagesService))
+            findReferencedSymbolsAsync (document, position, context, nameof (FSharpFindUsagesService))
             |> CancellableTask.startAsTask context.CancellationToken
 
         member _.FindImplementationsAsync(document, position, context) =
-            findReferencedSymbolsAsync (document, position, context, false, nameof (FSharpFindUsagesService))
+            findImplementationsAsync (document, position, context, nameof (FSharpFindUsagesService))
             |> CancellableTask.startAsTask context.CancellationToken

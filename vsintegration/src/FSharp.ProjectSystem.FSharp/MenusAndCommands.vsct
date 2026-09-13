@@ -355,6 +355,9 @@
 
     <KeyBinding guid="FSharpProjectCmdSet" id="MoveUpCmd" editor="SlnExplorerGuid" key1="VK_UP" mod1="Alt" />
     <KeyBinding guid="FSharpProjectCmdSet" id="MoveDownCmd" editor="SlnExplorerGuid" key1="VK_DOWN" mod1="Alt" />
+
+    <!-- Ctrl+F12 is Go To Implementation in C# and VB editors; the Roslyn command handles F# as well. -->
+    <KeyBinding guid="guidRoslynGrpId" id="cmdidGoToImplementation" editor="guidFSharpEditorFactory" key1="VK_F12" mod1="Control" />
   </KeyBindings>
   <Symbols>
     <!-- FSI-LINKAGE-POINT: choose the right package guid. -->
@@ -362,6 +365,9 @@
     <GuidSymbol name="guidFsiPkg" value="{871D2A70-12A2-4e42-9440-425DD92A4116}" />        <!-- fsharp package guid -->
 
     <GuidSymbol name="guidFSharpEditorFactory" value="{8a5aa6cf-46e3-4520-a70a-7393d15233e9}" /> <!-- FSharpEditorFactory Guid --> 
+    <GuidSymbol name="guidRoslynGrpId" value="{b61e1a20-8c13-49a9-a727-a0ec091647dd}"> <!-- Roslyn command group -->
+      <IDSymbol name="cmdidGoToImplementation" value="0x0200" />
+    </GuidSymbol>
     <GuidSymbol name="GUID_CMDSETID_StandardCommandSet2K" value="{1496A755-94DE-11D0-8C3F-00C04FC2AAE2}" /> <!-- See stdidcmd.h -->
     <GuidSymbol name="guidFsiToolWindow"      value="{dee22b65-9761-4a26-8fb2-759b971d6dfc}" />
     <GuidSymbol name="guidFsharpEditorUIContext" value="{63492653-460B-4bcc-B57B-233FD0F1F33D}" />
