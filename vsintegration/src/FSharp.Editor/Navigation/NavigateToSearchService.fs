@@ -230,7 +230,9 @@ type internal FSharpNavigableItemsCache
                 |> ValueOption.ofNullable
 
 [<Export(typeof<IFSharpNavigateToSearchService>); Shared>]
-type internal FSharpNavigateToSearchService [<ImportingConstructor>] (itemsCache: FSharpNavigableItemsCache) =
+type internal FSharpNavigateToSearchService
+    [<ImportingConstructor>]
+    (itemsCache: FSharpNavigableItemsCache, activeDocumentTracker: FSharpActiveDocumentTracker) =
 
     let kindsProvided =
         ImmutableHashSet.Create(
@@ -303,10 +305,27 @@ type internal FSharpNavigateToSearchService [<ImportingConstructor>] (itemsCache
     let createMatcherFor (searchPattern: string) =
         itemsCache.CreateMatcherFor searchPattern
 
+    /// The file open in the editor the user last gave focus to, read fresh for each search.
+    let activeFilePath () =
+        match activeDocumentTracker.Focus with
+        | ValueSome focus -> ValueSome focus.FilePath
+        | ValueNone -> ValueNone
+
+    /// Sorts a match from the active file before one from elsewhere, the way the C# and VB search services
+    /// already do; Roslyn applies this only once everything else, such as the match kind, is equal.
+    let secondarySortOf (activeFilePath: string voption) (document: Document) (item: NavigableItem) =
+        let tier =
+            match activeFilePath with
+            | ValueSome path when String.Equals(path, document.FilePath, StringComparison.OrdinalIgnoreCase) -> "0"
+            | _ -> "1"
+
+        $"{tier} {item.Name}"
+
     let processDocument
         (getItems: Document -> CancellableTask<NavigableItem array>)
         (tryMatch: NavigableItem -> PatternMatch voption)
         (kinds: IImmutableSet<string>)
+        (activeFilePath: string voption)
         (document: Document)
         =
         cancellableTask {
@@ -345,7 +364,8 @@ type internal FSharpNavigateToSearchService [<ImportingConstructor>] (itemsCache
                                             ImmutableArray.Create(TaggedText(TextTags.Text, item.Name)),
                                             document,
                                             sourceSpan
-                                        )
+                                        ),
+                                        secondarySortOf activeFilePath document item
                                     )
                     |]
                     |> ImmutableArray.CreateRange
@@ -354,10 +374,11 @@ type internal FSharpNavigateToSearchService [<ImportingConstructor>] (itemsCache
     let searchProject (project: Project) searchPattern kinds =
         cancellableTask {
             let tryMatch = createMatcherFor searchPattern
+            let activeFilePath = activeFilePath ()
 
             let! results =
                 project.Documents
-                |> Seq.map (processDocument itemsCache.GetNavigableItems tryMatch kinds)
+                |> Seq.map (processDocument itemsCache.GetNavigableItems tryMatch kinds activeFilePath)
                 // Throttle to avoid launching a parse per document in the project all at once.
                 |> CancellableTask.whenAllThrottled (max 1 Environment.ProcessorCount)
 
@@ -389,7 +410,13 @@ type internal FSharpNavigateToSearchService [<ImportingConstructor>] (itemsCache
             |> CancellableTask.start cancellationToken
 
         member _.SearchDocumentAsync(document: Document, searchPattern, kinds, cancellationToken) =
-            processDocument itemsCache.GetNavigableItems (createMatcherFor searchPattern) kinds document cancellationToken
+            processDocument
+                itemsCache.GetNavigableItems
+                (createMatcherFor searchPattern)
+                kinds
+                (activeFilePath ())
+                document
+                cancellationToken
 
         member _.KindsProvided = kindsProvided
 
@@ -409,12 +436,14 @@ type internal FSharpNavigateToSearchService [<ImportingConstructor>] (itemsCache
                 cancellationToken
             ) : Task =
             let tryMatch = createMatcherFor searchPattern
+            let activeFilePath = activeFilePath ()
             let priorityIds = ImmutableHashSet.CreateRange(priorityDocuments |> Seq.map _.Id)
             let isPriority (document: Document) = priorityIds.Contains document.Id
 
             let searchDocumentWhileLoading document =
                 cancellableTask {
-                    let! results = throttled (processDocument itemsCache.GetNavigableItemsWhileLoading tryMatch kinds document)
+                    let! results =
+                        throttled (processDocument itemsCache.GetNavigableItemsWhileLoading tryMatch kinds activeFilePath document)
 
                     if results.Length > 0 then
                         do! onResultsFound.Invoke results

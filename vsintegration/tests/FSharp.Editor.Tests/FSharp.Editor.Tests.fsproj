@@ -37,6 +37,7 @@
     <Compile Include="TaskListServiceTests.fs" />
     <Compile Include="NavigateToSearchServiceTests.fs" />
     <Compile Include="CopilotContextProviderTests.fs" />
+    <Compile Include="NavigateToSearchActiveFileTests.fs" />
     <Compile Include="ObjectBrowserNavInfoTests.fs" />
     <Compile Include="ObjectBrowserListTests.fs" />
     <Compile Include="CopilotContextProviderTests.fs" />
