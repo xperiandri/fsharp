@@ -105,6 +105,11 @@ Suggest names for unresolved identifiers;</source>
         <target state="translated">使用 '&lt;&gt;' 進行不等式檢查</target>
         <note />
       </trans-unit>
+      <trans-unit id="ConvertToReferenceTuple">
+        <source>Convert to reference tuple</source>
+        <target state="new">Convert to reference tuple</target>
+        <note />
+      </trans-unit>
       <trans-unit id="ConvertToShorthandLambda">
         <source>Convert to '_.' shorthand lambda</source>
         <target state="new">Convert to '_.' shorthand lambda</target>
@@ -123,6 +128,11 @@ Suggest names for unresolved identifiers;</source>
       <trans-unit id="ChangePrefixNegationToInfixSubtraction">
         <source>Use subtraction instead of negation</source>
         <target state="translated">使用減號代替否定</target>
+        <note />
+      </trans-unit>
+      <trans-unit id="ConvertToStructTuple">
+        <source>Convert to struct tuple</source>
+        <target state="new">Convert to struct tuple</target>
         <note />
       </trans-unit>
       <trans-unit id="CopilotSymbolTooltip">
