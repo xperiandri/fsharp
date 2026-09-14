@@ -37,6 +37,7 @@ let private actionsIn (context: TestContext) (code: string) (marker: string) =
 [<InlineData("x.M(fun y -> y.P)", "x.M(_.P)")>]
 [<InlineData("fun x -> x.P", "_.P")>]
 [<InlineData("(fun x -> x.P)", "(_.P)")>]
+[<InlineData("List.map (fun x ->\n    x.Prop) xs", "List.map _.Prop xs")>]
 let ``Lambda reading a member of its parameter converts to shorthand`` (before: string, after: string) =
     Assert.Equal(inModule after, refactored (inModule before) "fun")
 
@@ -85,10 +86,10 @@ let ``No action`` (binding: string) =
     Assert.Empty(actionsIn context code marker)
 
 [<Fact>]
-let ``No action on a lambda that spans lines`` () =
-    let code = "module M\n\nlet r =\n    fun x ->\n        x.P\n"
-    use context = TestContext.CreateWithCode code
-    Assert.Empty(actionsIn context code "fun")
+let ``Lambda spanning multiple lines still converts to shorthand`` () =
+    let before = "module M\n\nlet r =\n    fun x ->\n        x.P\n"
+    let after = "module M\n\nlet r =\n    _.P\n"
+    Assert.Equal(after, refactored before "fun")
 
 [<Fact>]
 let ``Converting to shorthand and back restores the lambda`` () =
