@@ -53,6 +53,10 @@ let ``Root module converts to a namespace with a nested module`` () =
 [<InlineData("namespace A.B\n\nmodule C =\n    let x = 1\n#if DEBUG\n    let y = 2\n#endif\n",
              "module A.B.C\nlet x = 1\n#if DEBUG\nlet y = 2\n#endif\n")>]
 [<InlineData("namespace A.B\r\n\r\nmodule C =\r\n    let x = 1\r\n", "module A.B.C\r\nlet x = 1\r\n")>]
+[<InlineData("namespace A.B\n\nopen System\n\nmodule C =\n    let x = 1\n", "module A.B.C\n\nopen System\n\nlet x = 1\n")>]
+[<InlineData("namespace A.B\n\nopen System\nopen System.Text\n\nmodule C =\n    let x = 1\n",
+             "module A.B.C\n\nopen System\nopen System.Text\n\nlet x = 1\n")>]
+[<InlineData("namespace A.B\n\nopen System\n\n/// Doc.\nmodule C =\n    let x = 1\n", "/// Doc.\nmodule A.B.C\n\nopen System\n\nlet x = 1\n")>]
 let ``Nested module converts to a root module`` (before: string, after: string) =
     Assert.Equal(after, refactored before "namespace")
 
@@ -71,7 +75,6 @@ let ``Converting to a nested module and back restores the root module`` () =
     Assert.Equal(original, refactored (refactored original "module") "namespace")
 
 [<Theory>]
-[<InlineData("namespace A.B\n\nopen System\n\nmodule C =\n    let x = 1\n", "namespace")>]
 [<InlineData("namespace A.B\n\nmodule C =\n    let x = 1\n\nmodule D =\n    let y = 2\n", "namespace")>]
 [<InlineData("namespace A.B\n\ntype T = int\n", "namespace")>]
 [<InlineData("namespace global\n\nmodule C =\n    let x = 1\n", "namespace")>]
@@ -81,6 +84,8 @@ let ``Converting to a nested module and back restores the root module`` () =
 [<InlineData("namespace A.B\n\nmodule C =\n    let x = 1\n", "let")>]
 [<InlineData("module A.B.C\n\nlet x = 1\n", "let")>]
 [<InlineData("namespace A.B\n\nmodule C =\n", "namespace")>]
+[<InlineData("namespace A.B\n\nmodule C =\n    let x = 1\n\nopen System\n", "namespace")>]
+[<InlineData("namespace A.B\n\nopen System\n\ntype T = int\n\nmodule C =\n    let x = 1\n", "namespace")>]
 let ``No action`` (code: string, marker: string) = Assert.Empty(actionsAt code marker)
 
 [<Fact>]

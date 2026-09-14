@@ -28,6 +28,7 @@ module private NamespaceModuleConversion =
             namespacePath: LongIdent *
             namespaceIsRecursive: bool *
             namespaceKeyword: range *
+            opens: range list *
             moduleIdent: Ident *
             moduleIsRecursive: bool *
             moduleKeyword: range *
@@ -48,6 +49,21 @@ module private NamespaceModuleConversion =
         let position = (spanOf sourceText m).End
         isBlank sourceText position (sourceText.Lines.GetLineFromPosition position).End
 
+    /// The declarations of a namespace are a single nested module, optionally preceded by `open`s that would
+    /// apply equally to a root module: moving them into it changes nothing they resolve against.
+    let private tryOpensBeforeNestedModule (decls: SynModuleDecl list) =
+        match List.rev decls with
+        | nestedModule :: reversedOpens when
+            reversedOpens
+            |> List.forall (function
+                | SynModuleDecl.Open _ -> true
+                | _ -> false)
+            ->
+            match nestedModule with
+            | SynModuleDecl.NestedModule _ -> Some(reversedOpens |> List.rev |> List.map _.Range, nestedModule)
+            | _ -> None
+        | _ -> None
+
     let tryShape (sourceText: SourceText) (parseTree: ParsedInput) =
         match parseTree with
         | ParsedInput.ImplFile(ParsedImplFileInput(
@@ -55,34 +71,39 @@ module private NamespaceModuleConversion =
                              longId = namespacePath
                              isRecursive = namespaceIsRecursive
                              kind = SynModuleOrNamespaceKind.DeclaredNamespace
-                             decls = [ SynModuleDecl.NestedModule(
-                                           moduleInfo = moduleInfo
-                                           isRecursive = moduleIsRecursive
-                                           decls = (firstDeclaration :: _ as declarations)
-                                           range = moduleRange
-                                           trivia = moduleTrivia) ]
+                             decls = decls
                              trivia = namespaceTrivia) ])) ->
-            match namespaceTrivia.LeadingKeyword, moduleInfo.LongIdent, moduleTrivia.ModuleKeyword, moduleTrivia.EqualsRange with
-            | SynModuleOrNamespaceLeadingKeyword.Namespace namespaceKeyword, [ moduleIdent ], Some moduleKeyword, Some equals when
-                namespaceKeyword.StartColumn = 0
-                && moduleKeyword.StartColumn = 0
-                && moduleKeyword.StartLine = equals.EndLine
-                && firstDeclaration.Range.StartLine > equals.EndLine
-                && Position.posEq moduleRange.End (List.last declarations).Range.End
-                && restOfLineIsBlank sourceText (List.last namespacePath).idRange
-                ->
-                ValueSome(
-                    Nested(
-                        namespacePath,
-                        namespaceIsRecursive,
-                        namespaceKeyword,
-                        moduleIdent,
-                        moduleIsRecursive,
-                        moduleKeyword,
-                        equals,
-                        firstDeclaration.Range.StartColumn
+            match tryOpensBeforeNestedModule decls with
+            | Some(opens,
+                   SynModuleDecl.NestedModule(
+                       moduleInfo = moduleInfo
+                       isRecursive = moduleIsRecursive
+                       decls = (firstDeclaration :: _ as declarations)
+                       range = moduleRange
+                       trivia = moduleTrivia)) ->
+                match namespaceTrivia.LeadingKeyword, moduleInfo.LongIdent, moduleTrivia.ModuleKeyword, moduleTrivia.EqualsRange with
+                | SynModuleOrNamespaceLeadingKeyword.Namespace namespaceKeyword, [ moduleIdent ], Some moduleKeyword, Some equals when
+                    namespaceKeyword.StartColumn = 0
+                    && moduleKeyword.StartColumn = 0
+                    && moduleKeyword.StartLine = equals.EndLine
+                    && firstDeclaration.Range.StartLine > equals.EndLine
+                    && Position.posEq moduleRange.End (List.last declarations).Range.End
+                    && restOfLineIsBlank sourceText (List.last namespacePath).idRange
+                    ->
+                    ValueSome(
+                        Nested(
+                            namespacePath,
+                            namespaceIsRecursive,
+                            namespaceKeyword,
+                            opens,
+                            moduleIdent,
+                            moduleIsRecursive,
+                            moduleKeyword,
+                            equals,
+                            firstDeclaration.Range.StartColumn
+                        )
                     )
-                )
+                | _ -> ValueNone
             | _ -> ValueNone
 
         | ParsedInput.ImplFile(ParsedImplFileInput(
@@ -150,13 +171,33 @@ module private NamespaceModuleConversion =
         let literalLines = linesInsideLiterals parseTree
 
         match shape with
-        | Nested(namespacePath, namespaceIsRecursive, namespaceKeyword, moduleIdent, moduleIsRecursive, _, equals, bodyColumn) ->
+        | Nested(
+            namespacePath = namespacePath
+            namespaceIsRecursive = namespaceIsRecursive
+            namespaceKeyword = namespaceKeyword
+            opens = opens
+            moduleIdent = moduleIdent
+            moduleIsRecursive = moduleIsRecursive
+            equals = equals
+            bodyColumn = bodyColumn) ->
             let namespaceLine = Line.toZ namespaceKeyword.StartLine
             let headerLine = Line.toZ equals.EndLine
+            let lineBreak = lineBreakOf sourceText lines[headerLine]
 
+            let openLines =
+                opens
+                |> List.collect (fun m -> [ Line.toZ m.StartLine .. Line.toZ m.EndLine ])
+                |> Set.ofList
+
+            // The first line after the namespace that is neither blank nor part of a moved `open`: a plain
+            // comment, an XML doc comment, an attribute, or (absent all of those) the module keyword itself.
+            // Everything before it — the namespace line, the opens, the blank lines around them — is deleted;
+            // everything from it onward stays exactly where it is.
             let firstKeptLine =
                 seq { namespaceLine + 1 .. headerLine }
-                |> Seq.find (fun i -> not (String.IsNullOrWhiteSpace(lines[i].ToString())))
+                |> Seq.find (fun i ->
+                    not (openLines.Contains i)
+                    && not (String.IsNullOrWhiteSpace(lines[i].ToString())))
 
             let moduleSpan = spanOf sourceText moduleIdent.idRange
             let equalsEnd = (spanOf sourceText equals).End
@@ -177,8 +218,19 @@ module private NamespaceModuleConversion =
                 $"{recursive}{textBetween sourceText namespacePath.Head (List.last namespacePath)}.{sourceText.ToString moduleSpan}"
 
             [
+                // The namespace line and every `open` before the module's own doc/attributes move to right after
+                // the header: a root-style `module A.B.C` must be the file's first declaration, so nothing — not
+                // even a leading `open` — can precede it.
                 TextChange(TextSpan.FromBounds(lines[namespaceLine].Start, lines[firstKeptLine].Start), "")
                 TextChange(TextSpan.FromBounds(moduleSpan.Start, headerEnd), rootPath)
+
+                if not (List.isEmpty opens) then
+                    let openText =
+                        opens
+                        |> List.map (fun m -> sourceText.ToString(spanOf sourceText m))
+                        |> String.concat lineBreak
+
+                    TextChange(TextSpan(lines[headerLine].EndIncludingLineBreak, 0), $"{lineBreak}{openText}{lineBreak}{lineBreak}")
 
                 for i in headerLine + 1 .. lines.Count - 1 do
                     let removed = min bodyColumn (leadingSpaces sourceText lines[i])
