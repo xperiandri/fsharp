@@ -124,11 +124,8 @@ module private DotLambdaConversion =
             match node with
             | SyntaxNode.SynExpr(SynExpr.Lambda(
                 fromMethod = false
-                parsedData = Some([ SynPat.Named(ident = SynIdent(parameter, _); isThisVal = false; accessibility = None) ], body)
-                range = range) as lambda) when
-                range.StartLine = range.EndLine
-                && not (isInQuotation path)
-                && not (isAppliedDirectly lambda path)
+                parsedData = Some([ SynPat.Named(ident = SynIdent(parameter, _); isThisVal = false; accessibility = None) ], body)) as lambda) when
+                not (isInQuotation path) && not (isAppliedDirectly lambda path)
                 ->
                 match tryChainRoot body with
                 | ValueSome root when hasName parameter.idText root && occurrencesOf parameter.idText body = 1 ->
