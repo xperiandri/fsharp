@@ -114,7 +114,7 @@
     <Compile Include="Navigation\ClassifiedReferenceLine.fs" />
     <Compile Include="Navigation\FindUsagesService.fs" />
     <Compile Include="Navigation\FindDefinitionService.fs" />
-    <Compile Include="Copilot\ActiveDocumentTracker.fs" />
+    <Compile Include="Copilot\EditorFocus.fs" />
     <Compile Include="Copilot\CopilotSymbolMapping.fs" />
     <Compile Include="Copilot\CopilotSymbolSnippets.fs" />
     <Compile Include="Copilot\CopilotContextProvider.fs" />
