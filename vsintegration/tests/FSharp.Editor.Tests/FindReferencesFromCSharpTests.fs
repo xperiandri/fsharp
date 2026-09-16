@@ -30,7 +30,9 @@ let private library =
 let private moduleName = $"{library.Name}.ModuleFirst"
 
 let private solution =
-    let librarySolution, checker = RoslynTestHelpers.CreateMultiProjectSolution library
+    let struct (librarySolution, checker) =
+        RoslynTestHelpers.CreateMultiProjectSolution library
+
     let assembly = RoslynTestHelpers.CompileToAssembly(library, checker)
 
     RoslynTestHelpers.AddCSharpProject(
