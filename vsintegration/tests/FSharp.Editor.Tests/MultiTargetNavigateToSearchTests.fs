@@ -30,19 +30,22 @@ let private project =
     )
 
 let private solution, instances =
-    RoslynTestHelpers.CreateMultiTargetSolution(
-        project,
-        [
-            {
-                Defines = []
-                ExcludedFileIds = [ "Fourth" ]
-            }
-            {
-                Defines = [ "FOO" ]
-                ExcludedFileIds = []
-            }
-        ]
-    )
+    let struct (solution, instances) =
+        RoslynTestHelpers.CreateMultiTargetSolution(
+            project,
+            [
+                {
+                    Defines = []
+                    ExcludedFileIds = [ "Fourth" ]
+                }
+                {
+                    Defines = [ "FOO" ]
+                    ExcludedFileIds = []
+                }
+            ]
+        )
+
+    solution, instances
 
 let private service: IFSharpNavigateToSearchService =
     MefHelpers.createExportProvider().GetExportedValue()

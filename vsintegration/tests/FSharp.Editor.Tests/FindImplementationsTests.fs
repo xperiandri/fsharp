@@ -93,7 +93,9 @@ class CSharpDog : ModuleShapes.Animal
 """
 
 let private solution =
-    let librarySolution, checker = RoslynTestHelpers.CreateMultiProjectSolution library
+    let struct (librarySolution, checker) =
+        RoslynTestHelpers.CreateMultiProjectSolution library
+
     let assembly = RoslynTestHelpers.CompileToAssembly(library, checker)
 
     RoslynTestHelpers.AddCSharpProject(librarySolution, "Consumer", csharpSource, library.GetProjectOptions checker, [ assembly ])
