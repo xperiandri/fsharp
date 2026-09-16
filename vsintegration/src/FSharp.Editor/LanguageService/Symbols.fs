@@ -85,8 +85,9 @@ type FSharpSymbolUse with
                 else
                     let projects =
                         currentDocument.GetSolutionDocumentsWithFilePath loc.FileName
-                        |> List.map _.Project
-                        |> List.distinctBy _.Id
+                        |> Seq.map _.Project
+                        |> Seq.distinctBy _.Id
+                        |> Seq.toList
 
                     match projects with
                     | [] -> None
