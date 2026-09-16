@@ -211,6 +211,7 @@ type TestHostServices() =
 
 /// One Roslyn project instance of a multi-targeted F# project: its extra defines and the
 /// synthetic files left out of it, as VS does per target framework.
+[<Struct>]
 type TargetInstance =
     {
         Defines: string list
@@ -481,8 +482,8 @@ type RoslynTestHelpers private () =
         let projects =
             syntheticProject.GetAllProjects()
             |> Seq.distinctBy _.Name
-            |> Seq.map (fun project -> project, ProjectId.CreateNewId())
-            |> Seq.toList
+            |> Seq.map (fun project -> struct (project, ProjectId.CreateNewId()))
+            |> Seq.toArray
 
         let projectIds = dict [ for project, id in projects -> project.Name, id ]
 
