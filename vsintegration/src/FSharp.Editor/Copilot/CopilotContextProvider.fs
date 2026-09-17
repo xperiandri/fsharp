@@ -145,7 +145,7 @@ module internal CopilotSymbolQuery =
     /// The documents in the order a query visits them: the ones the user has open, the ones already
     /// parsed into the cache, and the ones that would have to be parsed to answer.
     let private tiers (cache: FSharpNavigableItemsCache) (openIds: HashSet<DocumentId>) (solution: Solution) =
-        let opened = ResizeArray()
+        let opened = ResizeArray(openIds.Count)
         let cached = ResizeArray()
         let cold = ResizeArray()
 
@@ -157,7 +157,7 @@ module internal CopilotSymbolQuery =
                 | ValueSome items -> cached.Add(struct (document, items))
                 | ValueNone -> cold.Add document
 
-        struct (opened, cached, cold)
+        struct (opened :> IReadOnlyList<_>, cached :> IReadOnlyList<_>, cold :> IReadOnlyList<_>)
 
     /// Visits the documents tier by tier until `enough` answers, parsing the cold ones for at most
     /// `budgetMs`. The budget stops handing out documents rather than cancelling a parse under way:
