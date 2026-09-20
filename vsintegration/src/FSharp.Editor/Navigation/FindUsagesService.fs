@@ -279,7 +279,7 @@ module FSharpFindUsagesService =
                 let crossLanguageSearch =
                     match caret.SymbolUse.Symbol.DocumentationCommentId with
                     | ValueSome docId when not declarations.IsExternal && not caret.SymbolUse.Symbol.IsInternalToProject ->
-                        findCrossLanguageReferences docId declarations.DefinitionItems
+                        findCrossLanguageReferences docId declarations.DefinitionItems cancellationToken
                     | _ -> Task.FromResult Seq.empty
 
                 do! SymbolHelpers.findSymbolUses caret.SymbolUse document caret.CheckFileResults onFound
