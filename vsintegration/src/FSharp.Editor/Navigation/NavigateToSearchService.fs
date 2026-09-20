@@ -14,6 +14,7 @@ open System.Threading.Tasks
 open Microsoft.CodeAnalysis
 open Microsoft.CodeAnalysis.ExternalAccess.FSharp.Navigation
 open Microsoft.CodeAnalysis.ExternalAccess.FSharp.NavigateTo
+open Microsoft.CodeAnalysis.Text
 open Microsoft.VisualStudio.LanguageServices
 open Microsoft.VisualStudio.Text.PatternMatching
 
@@ -339,7 +340,9 @@ type internal FSharpNavigateToSearchService [<ImportingConstructor>] (itemsCache
                                         formatInfo item.Container document,
                                         navigateToItemKindToRoslynKind item.Kind,
                                         patternMatchKindToNavigateToMatchKind m.Kind,
+                                        m.IsCaseSensitive,
                                         item.Name,
+                                        ImmutableArray<TextSpan>.Empty,
                                         FSharpNavigableItem(
                                             navigateToItemKindToGlyph item.Kind,
                                             ImmutableArray.Create(TaggedText(TextTags.Text, item.Name)),
