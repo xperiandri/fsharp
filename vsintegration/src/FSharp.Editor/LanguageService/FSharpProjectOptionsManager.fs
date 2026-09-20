@@ -352,8 +352,7 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
 
                 let addToCacheAndSubscribe (entry: SingleFileCacheEntry) =
                     let subscription =
-                        focusedCaret
-                        |> ValueOption.map _.LineChanged.Subscribe(updateProjectOptions)
+                        focusedCaret |> ValueOption.map _.LineChanged.Subscribe(updateProjectOptions)
 
                     { entry with
                         Subscription = subscription
