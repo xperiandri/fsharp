@@ -215,7 +215,7 @@ let ``candidate documents narrow to the file that declares the entity among seve
     let project = solution.Projects |> Seq.exactlyOne
 
     let candidates =
-        CrossLanguageSymbolNavigation.candidateDocuments [ syntheticProject.Name; "ModuleSecond" ] project
+        CrossLanguageSymbolNavigation.candidateDocuments cache [ syntheticProject.Name; "ModuleSecond" ] project
         |> run
         |> List.map _.FilePath
 
@@ -225,7 +225,7 @@ let ``candidate documents narrow to the file that declares the entity among seve
     let path = CrossLanguageSymbolNavigation.docCommentIdToPath docId
 
     match
-        CrossLanguageSymbolNavigation.tryLocateViaNavigableItems docId path project
+        CrossLanguageSymbolNavigation.tryLocateViaNavigableItems cache docId path project
         |> run
     with
     | ValueSome range -> Assert.Equal(syntheticProject.GetFilePath "Second", range.FileName)
@@ -267,7 +267,7 @@ let onlyLater x = x * 4
         }
 
     let found =
-        CrossLanguageSymbolNavigation.tryFindDeclaration solution "test.dll" "M:Widgets.onlyLater(System.Int32)"
+        CrossLanguageSymbolNavigation.tryFindDeclaration cache solution "test.dll" "M:Widgets.onlyLater(System.Int32)"
         |> run
 
     match found with
