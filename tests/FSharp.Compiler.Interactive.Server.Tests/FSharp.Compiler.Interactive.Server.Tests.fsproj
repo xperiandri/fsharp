@@ -37,6 +37,7 @@
          to link against it, so its output is deliberately not consumed. -->
     <ProjectReference Include="$(FSharpSourcesRoot)\fsi\fsiProject\fsi.fsproj"
                       ReferenceOutputAssembly="false"
+                      SetTargetFramework="TargetFramework=$(FSharpNetCoreProductTargetFramework)"
                       SkipGetTargetFrameworkProperties="true"
                       Private="false" />
   </ItemGroup>
