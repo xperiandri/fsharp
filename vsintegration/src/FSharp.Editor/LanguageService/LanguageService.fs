@@ -536,6 +536,7 @@ type internal FSharpPackage() as this =
 
         objectBrowserLibrary <- ValueNone
         objectBrowserCookie <- 0u
+
     /// Copilot's registration service is an exported brokered service whose MEF part constructor blocks waiting
     /// for the main thread. Asking for the proxy from a background thread therefore deadlocks against anyone
     /// asking for it from the main thread - the Git provider does, while creating its services at solution open -
