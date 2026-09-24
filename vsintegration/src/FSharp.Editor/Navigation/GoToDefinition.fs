@@ -603,21 +603,22 @@ type internal GoToDefinition(metadataAsSource: FSharpMetadataAsSourceService) =
         navigationService.TryNavigateToSpan(workspace, navigableItem.Document.Id, navigableItem.SourceSpan, cancellationToken)
         |> ignore
 
-    member _.NavigateToItem(navigableItem: FSharpNavigableItem, cancellationToken: CancellationToken) =
-
+    member _.NavigateToItem(navigableItem: FSharpNavigableItem, options: FSharpNavigationOptions3, cancellationToken: CancellationToken) =
         let workspace = navigableItem.Document.Project.Solution.Workspace
 
         let navigationService =
             workspace.Services.GetService<IFSharpDocumentNavigationService>()
 
-        // Prefer open documents in the preview tab.
-        let result =
-            navigationService.TryNavigateToSpan(workspace, navigableItem.Document.Id, navigableItem.SourceSpan, cancellationToken)
+        navigationService.TryNavigateToSpan(workspace, navigableItem.Document.Id, navigableItem.SourceSpan, options, cancellationToken)
 
-        result
+    /// Prefers an open document in the preview tab.
+    member this.NavigateToItem(navigableItem: FSharpNavigableItem, cancellationToken: CancellationToken) =
+        this.NavigateToItem(navigableItem, FSharpNavigationOptions3(FSharpNavigationDestination.ProvisionalTab), cancellationToken)
 
     /// Find the declaration location (signature file/.fsi) of the target symbol if possible, fall back to definition
-    member this.NavigateToSymbolDeclarationAsync(targetDocument: Document, targetSourceText: SourceText, symbolRange: range) =
+    member this.NavigateToSymbolDeclarationAsync
+        (targetDocument: Document, targetSourceText: SourceText, symbolRange: range, options: FSharpNavigationOptions3)
+        =
         cancellableTask {
             let! item = this.FindDeclarationOfSymbolAtRange(targetDocument, symbolRange, targetSourceText)
 
@@ -625,11 +626,13 @@ type internal GoToDefinition(metadataAsSource: FSharpMetadataAsSourceService) =
             | None -> return false
             | Some item ->
                 let! cancellationToken = CancellableTask.getCancellationToken ()
-                return this.NavigateToItem(item, cancellationToken)
+                return this.NavigateToItem(item, options, cancellationToken)
         }
 
     /// Find the definition location (implementation file/.fs) of the target symbol
-    member this.NavigateToSymbolDefinitionAsync(targetDocument: Document, targetSourceText: SourceText, symbolRange: range) =
+    member this.NavigateToSymbolDefinitionAsync
+        (targetDocument: Document, targetSourceText: SourceText, symbolRange: range, options: FSharpNavigationOptions3)
+        =
         cancellableTask {
             let! item = this.FindDefinitionOfSymbolAtRange(targetDocument, symbolRange, targetSourceText)
 
@@ -637,7 +640,7 @@ type internal GoToDefinition(metadataAsSource: FSharpMetadataAsSourceService) =
             | None -> return false
             | Some item ->
                 let! cancellationToken = CancellableTask.getCancellationToken ()
-                return this.NavigateToItem(item, cancellationToken)
+                return this.NavigateToItem(item, options, cancellationToken)
         }
 
     member this.NavigateToExternalDeclarationAsync(targetSymbolUse: FSharpSymbolUse, metadataReferences: seq<MetadataReference>) =
@@ -692,7 +695,13 @@ type internal FSharpNavigation(metadataAsSource: FSharpMetadataAsSourceService, 
                             else
                                 // Navigation request was made in a .fs file, so we try to find the implementation of the symbol at target range.
                                 // This is the part that may take some time, because of type checks involved.
-                                let! result = gtd.NavigateToSymbolDefinitionAsync(targetDoc, targetSource, range)
+                                let! result =
+                                    gtd.NavigateToSymbolDefinitionAsync(
+                                        targetDoc,
+                                        targetSource,
+                                        range,
+                                        FSharpNavigationOptions3(FSharpNavigationDestination.ProvisionalTab)
+                                    )
 
                                 if not result then
                                     // In case the above fails, we just navigate to target range.
