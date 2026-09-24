@@ -40,33 +40,46 @@ type internal DocCommentId =
     | None
 
 type FSharpNavigableLocation(metadataAsSource: FSharpMetadataAsSourceService, symbolRange: range, project: Project) =
+
+    /// Roslyn decides what "going there" means - a tab, or the peek pane it is showing - so the options it handed us
+    /// are handed back to it unchanged.
+    member _.NavigateToAsync(options: FSharpNavigationOptions3, cancellationToken: CancellationToken) : Task<bool> =
+        cancellableTask {
+            let targetPath = symbolRange.FileName
+
+            let! cancellationToken = CancellableTask.getCancellationToken ()
+
+            let targetDoc =
+                project.Solution.TryGetDocumentFromFSharpRange(symbolRange, project.Id)
+
+            match targetDoc with
+            | None -> return false
+            | Some targetDoc ->
+                let! targetSource = targetDoc.GetTextAsync(cancellationToken)
+                let gtd = GoToDefinition(metadataAsSource)
+
+                let (|Signature|Implementation|) filepath =
+                    if isSignatureFile filepath then
+                        Signature
+                    else
+                        Implementation
+
+                match targetPath with
+                | Signature -> return! gtd.NavigateToSymbolDefinitionAsync(targetDoc, targetSource, symbolRange, options)
+                | Implementation -> return! gtd.NavigateToSymbolDeclarationAsync(targetDoc, targetSource, symbolRange, options)
+        }
+        |> CancellableTask.start cancellationToken
+
     interface IFSharpNavigableLocation with
-        member _.NavigateToAsync(_options: FSharpNavigationOptions2, cancellationToken: CancellationToken) : Task<bool> =
-            cancellableTask {
-                let targetPath = symbolRange.FileName
+        member this.NavigateToAsync(options: FSharpNavigationOptions2, cancellationToken: CancellationToken) : Task<bool> =
+            this.NavigateToAsync(
+                FSharpNavigationOptions3(FSharpTabDestination(options.PreferProvisionalTab, options.ActivateTab)),
+                cancellationToken
+            )
 
-                let! cancellationToken = CancellableTask.getCancellationToken ()
-
-                let targetDoc =
-                    project.Solution.TryGetDocumentFromFSharpRange(symbolRange, project.Id)
-
-                match targetDoc with
-                | None -> return false
-                | Some targetDoc ->
-                    let! targetSource = targetDoc.GetTextAsync(cancellationToken)
-                    let gtd = GoToDefinition(metadataAsSource)
-
-                    let (|Signature|Implementation|) filepath =
-                        if isSignatureFile filepath then
-                            Signature
-                        else
-                            Implementation
-
-                    match targetPath with
-                    | Signature -> return! gtd.NavigateToSymbolDefinitionAsync(targetDoc, targetSource, symbolRange)
-                    | Implementation -> return! gtd.NavigateToSymbolDeclarationAsync(targetDoc, targetSource, symbolRange)
-            }
-            |> CancellableTask.start cancellationToken
+    interface IFSharpNavigableLocation2 with
+        member this.NavigateToAsync(options: FSharpNavigationOptions3, cancellationToken: CancellationToken) : Task<bool> =
+            this.NavigateToAsync(options, cancellationToken)
 
 /// Locates the F# declaration Roslyn names by assembly and documentation comment id when C# or
 /// Visual Basic navigates into an F# project. Kept apart from the MEF service so it can be exercised
