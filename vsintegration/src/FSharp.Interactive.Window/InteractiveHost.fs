@@ -486,27 +486,32 @@ type internal InteractiveHostClient(clientProcessId: int) =
                     ]
                 | _ -> candidates
 
-            let rec attempt remaining (failures: string list) =
-                task {
-                    match remaining with
-                    | [] -> return Result.Error(String.Join(Environment.NewLine, List.rev failures))
-                    | candidate :: rest ->
-                        match! startAttemptAsync options candidate cancellationToken with
-                        | Result.Ok remote ->
-                            lock workedIn (fun () -> workedIn[key] <- candidate.Origin)
-                            sessionStarted.Trigger remote
-                            return Result.Ok remote
-                        | Result.Error(exitedEarly, detail, release) ->
-                            lock workedIn (fun () -> workedIn.Remove key |> ignore)
+            // A loop rather than a recursive task: `let rec` inside resumable code cannot be compiled
+            // statically (FS3511).
+            let failures = ResizeArray<string>()
+            let mutable remaining = ordered
+            let mutable outcome = ValueNone
 
-                            if exitedEarly && not rest.IsEmpty then
-                                return! attempt rest (detail :: failures)
-                            else
-                                release ()
-                                return Result.Error(String.Join(Environment.NewLine, List.rev (detail :: failures)))
-                }
+            while outcome.IsNone do
+                match remaining with
+                | [] -> outcome <- ValueSome(Result.Error(String.Join(Environment.NewLine, failures)))
+                | candidate :: rest ->
+                    remaining <- rest
 
-            return! attempt ordered []
+                    match! startAttemptAsync options candidate cancellationToken with
+                    | Result.Ok remote ->
+                        lock workedIn (fun () -> workedIn[key] <- candidate.Origin)
+                        sessionStarted.Trigger remote
+                        outcome <- ValueSome(Result.Ok remote)
+                    | Result.Error(exitedEarly, detail, release) ->
+                        lock workedIn (fun () -> workedIn.Remove key |> ignore)
+                        failures.Add detail
+
+                        if not exitedEarly || rest.IsEmpty then
+                            release ()
+                            outcome <- ValueSome(Result.Error(String.Join(Environment.NewLine, failures)))
+
+            return outcome.Value
         }
 
     member _.OutputReceived = outputReceived.Publish
