@@ -33,6 +33,20 @@ type internal LegacyProjectWorkspaceMap
         not (String.IsNullOrWhiteSpace path)
         && path |> Seq.forall (fun c -> not (Set.contains c invalidPathChars))
 
+    /// The folders the file sits in inside the project. Navigate To orders results that match equally well by how
+    /// far their folders are from the file being edited, so a document added without them is as far from that file
+    /// as every other one. A linked file from outside the project has none, as it has no place in the project tree.
+    let foldersOf (projectDirectory: string) (file: string) =
+        let directory = Path.GetDirectoryName file
+
+        if String.IsNullOrEmpty projectDirectory || String.IsNullOrEmpty directory then
+            Array.empty
+        elif directory.StartsWith(projectDirectory + string Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) then
+            directory.Substring(projectDirectory.Length)
+            |> _.Split([| Path.DirectorySeparatorChar; Path.AltDirectorySeparatorChar |], StringSplitOptions.RemoveEmptyEntries)
+        else
+            Array.empty
+
     let projectDisplayNameOf projectFileName =
         if String.IsNullOrWhiteSpace projectFileName then
             projectFileName
@@ -62,6 +76,12 @@ type internal LegacyProjectWorkspaceMap
 
         let projectId = projectContext.Id
 
+        let projectDirectory =
+            if isPathWellFormed site.ProjectFileName then
+                Path.GetDirectoryName(Path.GetFullPath site.ProjectFileName)
+            else
+                ""
+
         projectInfoManager.SetLegacyProjectSite(projectId, site)
 
         // Sync the source files in projectContext.  Note that these source files are __not__ maintained in order in projectContext
@@ -75,7 +95,7 @@ type internal LegacyProjectWorkspaceMap
 
         for file in updatedFiles do
             if not (originalFiles.Contains(file)) then
-                projectContext.AddSourceFile(file, SourceCodeKind.Regular)
+                projectContext.AddSourceFile(file, SourceCodeKind.Regular, foldersOf projectDirectory file)
 
         for file in originalFiles do
             if not (updatedFiles.Contains(file)) then
@@ -109,7 +129,7 @@ type internal LegacyProjectWorkspaceMap
             //projectContext.SetOptions(String.concat " " updatedOptions)
             for file in updatedFiles do
                 projectContext.RemoveSourceFile(file)
-                projectContext.AddSourceFile(file, SourceCodeKind.Regular)
+                projectContext.AddSourceFile(file, SourceCodeKind.Regular, foldersOf projectDirectory file)
 
             // Record the last seen options as an associated value
             if ok then
