@@ -379,23 +379,26 @@ type internal FSharpNavigateToSearchService [<ImportingConstructor>] (itemsCache
                     |> ImmutableArray.CreateRange
         }
 
-    let searchProject (project: Project) searchPattern kinds =
+    /// Priority items first, each half in its original order, as NavigateTo's own service orders its work.
+    let prioritize isPriority items =
+        let priority, rest = items |> Seq.toArray |> Array.partition isPriority
+        [| yield! priority; yield! rest |]
+
+    let searchProject (project: Project) (priorityDocuments: ImmutableArray<Document>) searchPattern kinds =
         cancellableTask {
             let tryMatch = createMatcherFor searchPattern
+            let priorityIds = ImmutableHashSet.CreateRange(priorityDocuments |> Seq.map _.Id)
 
             let! results =
                 project.Documents
+                // The document the user is looking at answers first, as it does for C# and Visual Basic.
+                |> prioritize (fun (document: Document) -> priorityIds.Contains document.Id)
                 |> Seq.map (processDocument itemsCache.GetNavigableItems tryMatch kinds)
                 // Throttle to avoid launching a parse per document in the project all at once.
                 |> CancellableTask.whenAllThrottled (max 1 Environment.ProcessorCount)
 
             return results |> Seq.collect _.AsEnumerable() |> Seq.toImmutableArray
         }
-
-    /// Priority items first, each half in its original order, as NavigateTo's own service orders its work.
-    let prioritize isPriority items =
-        let priority, rest = items |> Seq.toArray |> Array.partition isPriority
-        [| yield! priority; yield! rest |]
 
     /// A parse behind the loading search takes a turn on the budget every search shares.
     let throttled (work: CancellableTask<'a>) =
@@ -411,9 +414,9 @@ type internal FSharpNavigateToSearchService [<ImportingConstructor>] (itemsCache
 
     interface IFSharpNavigateToSearchService with
         member _.SearchProjectAsync
-            (project, _priorityDocuments, searchPattern, kinds, cancellationToken)
+            (project, priorityDocuments, searchPattern, kinds, cancellationToken)
             : Task<ImmutableArray<FSharpNavigateToSearchResult>> =
-            searchProject project searchPattern kinds
+            searchProject project priorityDocuments searchPattern kinds
             |> CancellableTask.start cancellationToken
 
         member _.SearchDocumentAsync(document: Document, searchPattern, kinds, cancellationToken) =
