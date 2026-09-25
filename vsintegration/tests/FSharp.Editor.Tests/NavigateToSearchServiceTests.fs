@@ -24,6 +24,11 @@ module HeyHo =
     let one' = 1
     let two'' = 2
 
+    type Widget =
+        { Size: int }
+
+        static member Create size = { Size = size }
+
     type CamelCaseLongName = class end
 
     module Alpha =
@@ -68,6 +73,9 @@ module HeyHo =
 
     [<Fact>]
     let ``operator`` () = assertResultsContain "+>" "+>"
+
+    [<Fact>]
+    let ``a static member of a record`` () = assertResultsContain "Create" "Create"
 
     [<Fact>]
     let ``nested containers`` () =
