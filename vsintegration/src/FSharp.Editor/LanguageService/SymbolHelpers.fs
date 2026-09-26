@@ -181,6 +181,37 @@ module internal SymbolHelpers =
     let codeSymbolUseKinds =
         RelatedSymbolUseKind.All &&& ~~~RelatedSymbolUseKind.XmlDocParameter
 
+    /// The project-wide index behind `getSymbolUsesInProjects` leaves out names inside `///` comments, and only
+    /// a declaration carries them, so they are read from the check results of the files that declare the symbol.
+    let private findXmlDocUsesInDeclaringFiles
+        (symbol: FSharpSymbol)
+        (currentDocument: Document)
+        (onFound: Document -> range seq -> CancellableTask<unit>)
+        =
+        cancellableTask {
+            let declaringFiles =
+                [ symbol.DeclarationLocation; symbol.SignatureLocation ]
+                |> List.choose id
+                |> List.map _.FileName
+                |> List.distinct
+
+            for file in declaringFiles do
+                match currentDocument.TryGetSolutionDocumentFromPath file with
+                | ValueSome doc ->
+                    let! _, checkFileResults = doc.GetFSharpParseAndCheckResultsAsync("findXmlDocUsesInDeclaringFiles")
+                    let codeUses = checkFileResults.GetUsesOfSymbolInFile(symbol)
+
+                    let docUses =
+                        checkFileResults.GetUsesOfSymbolInFile(symbol, relatedSymbolKinds = RelatedSymbolUseKind.XmlDocParameter)
+                        |> Seq.map _.Range
+                        |> Seq.filter (fun docRange ->
+                            codeUses
+                            |> Array.forall (fun codeUse -> not (Range.equals codeUse.Range docRange)))
+
+                    do! onFound doc docUses
+                | ValueNone -> ()
+        }
+
     let findSymbolUses
         (symbolUse: FSharpSymbolUse)
         (currentDocument: Document)
@@ -228,6 +259,9 @@ module internal SymbolHelpers =
                         |> List.distinct
 
                 do! getSymbolUsesInProjects (symbolUse.Symbol, currentDocument.Project, projectsToCheck, onFound)
+
+                if relatedSymbolKinds.HasFlag RelatedSymbolUseKind.XmlDocParameter then
+                    do! findXmlDocUsesInDeclaringFiles symbolUse.Symbol currentDocument onFound
 
             // The symbol is declared in .NET framework, an external assembly or in a C# project within the solution.
             // Optimization: Only search projects that reference the specific assembly
