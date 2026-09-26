@@ -117,8 +117,7 @@ module FSharpFindUsagesService =
                         |> Seq.tryFind (fun symbol ->
                             match symbol.ContainingAssembly with
                             | null -> false
-                            | assembly ->
-                                String.Equals(assembly.Name, declaringAssembly, StringComparison.OrdinalIgnoreCase))
+                            | assembly -> String.Equals(assembly.Name, declaringAssembly, StringComparison.OrdinalIgnoreCase))
 
                     match ofDeclaringAssembly with
                     | None -> return Seq.empty

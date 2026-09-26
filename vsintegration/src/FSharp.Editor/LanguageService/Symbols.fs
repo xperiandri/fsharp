@@ -87,8 +87,6 @@ type FSharpSymbolUse with
                     // should be treated as an individual project
                     Some(SymbolScope.Projects([ currentDocument.Project ], isSymbolLocalForProject))
                 else
-                    let solution = currentDocument.Project.Solution
-
                     let projects =
                         currentDocument.GetSolutionDocumentsWithFilePath loc.FileName
                         |> Seq.map _.Project

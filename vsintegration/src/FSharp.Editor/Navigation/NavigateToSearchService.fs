@@ -22,10 +22,18 @@ open FSharp.Compiler.EditorServices
 open FSharp.Compiler.Syntax
 open CancellableTasks
 
-/// Where a parse of a file is kept: under the defines it was parsed with, or under `AnyDefines` when its tree
-/// holds no conditional directives and so reads the same under any of them.
+/// Where a parse of a file is kept: under what the parse depends on besides the text. The defines are those it was
+/// parsed with, or `AnyDefines` when its tree holds no conditional directives and so reads the same under any of
+/// them; the language version decides what the parser accepts and is never shared across versions. The remaining
+/// parsing options cannot differ for one path: the editor never applies line directives, and whether a file is
+/// interactive follows from its own extension.
 [<Struct>]
-type private NavigableItemsKey = { Defines: string; FilePath: string }
+type private NavigableItemsKey =
+    {
+        Defines: string
+        LangVersion: string
+        FilePath: string
+    }
 
 /// The navigable items of one parse of a file, and the text version it was taken from.
 [<Struct>]
@@ -84,6 +92,13 @@ type internal FSharpNavigableItemsCache
     let definesOf (document: Document) =
         document.GetFSharpQuickDefines() |> String.concat ";"
 
+    let keyOf (document: Document) defines path =
+        {
+            Defines = defines
+            LangVersion = snd (document.GetFsharpParsingOptions())
+            FilePath = path
+        }
+
     /// The entry for the file, from the parse every instance shares when it has no directives, otherwise from
     /// the one parsed with this instance's defines. `matchesVersion` is false for the caller that takes the
     /// last parse whatever version it came from.
@@ -92,14 +107,22 @@ type internal FSharpNavigableItemsCache
         | null -> ValueNone
         | path ->
             let entry defines =
-                match cache.TryGetValue({ Defines = defines; FilePath = path }) with
+                match cache.TryGetValue(keyOf document defines path) with
                 | true, entry when matchesVersion entry.Version -> ValueSome entry
                 | _ -> ValueNone
+
+            // The defines are the project's own only once it has produced its options. Before that they are the
+            // editing defaults, which a project that defines nothing of its own really has, so a project without
+            // options would read that project's parse as if it were its own.
+            let ownParse =
+                match document.TryGetFSharpParsingOptionsData() with
+                | ValueSome _ -> entry (definesOf document)
+                | ValueNone -> ValueNone
 
             match entry AnyDefines with
             | ValueSome found -> ValueSome found
             | ValueNone ->
-                match entry (definesOf document) with
+                match ownParse with
                 | ValueSome found -> ValueSome found
                 // Only the search that runs while the solution loads takes this one: it is approximate, and the
                 // exact search refuses an approximate entry.
@@ -109,7 +132,7 @@ type internal FSharpNavigableItemsCache
         match document.FilePath with
         | null -> ()
         | path ->
-            cache[{ Defines = defines; FilePath = path }] <-
+            cache[keyOf document defines path] <-
                 {
                     Version = version
                     Approximate = approximate
