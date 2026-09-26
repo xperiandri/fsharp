@@ -100,7 +100,7 @@ module FSharpFindUsagesService =
             }
 
     /// Locations in a C# or VB project of the symbol with the given documentation comment id.
-    let private findRoslynReferences (docId: string) (project: Project) =
+    let private findRoslynReferences (docId: string) (declaringAssembly: string) (project: Project) =
         cancellableTask {
             let! cancellationToken = CancellableTask.getCancellationToken ()
             // Building a compilation and walking it costs the same cores the F# search is using.
@@ -110,9 +110,19 @@ module FSharpFindUsagesService =
                 match! project.GetCompilationAsync cancellationToken with
                 | null -> return Seq.empty
                 | compilation ->
-                    match DocumentationCommentId.GetFirstSymbolForDeclarationId(docId, compilation) with
-                    | null -> return Seq.empty
-                    | symbol ->
+                    // The id names a symbol of the F# assembly. A consumer that declares the same name itself
+                    // would answer a compilation-wide lookup first, and the search would report its uses.
+                    let ofDeclaringAssembly =
+                        DocumentationCommentId.GetSymbolsForDeclarationId(docId, compilation)
+                        |> Seq.tryFind (fun symbol ->
+                            match symbol.ContainingAssembly with
+                            | null -> false
+                            | assembly ->
+                                String.Equals(assembly.Name, declaringAssembly, StringComparison.OrdinalIgnoreCase))
+
+                    match ofDeclaringAssembly with
+                    | None -> return Seq.empty
+                    | Some symbol ->
                         let! referencedSymbols =
                             SymbolFinder.FindReferencesAsync(
                                 symbol,
@@ -136,11 +146,11 @@ module FSharpFindUsagesService =
         seq {
             for struct (definitionItem, declaringProject) in definitionItems do
                 for project in ProjectFiltering.getCompilationProjectsReferencingOutputOf declaringProject ->
-                    struct (definitionItem, project)
+                    struct (definitionItem, declaringProject.AssemblyName, project)
         }
-        |> Seq.distinctBy (fun struct (_, project) -> project.Id)
-        |> Seq.map (fun struct (definitionItem, project) ->
-            findRoslynReferences docId project
+        |> Seq.distinctBy (fun struct (_, _, project) -> project.Id)
+        |> Seq.map (fun struct (definitionItem, declaringAssembly, project) ->
+            findRoslynReferences docId declaringAssembly project
             |> CancellableTask.map (Seq.map (fun location -> struct (definitionItem, location))))
         |> CancellableTask.whenAllThrottled ConcurrentCompilations
         |> CancellableTask.map Seq.concat
