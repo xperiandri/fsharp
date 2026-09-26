@@ -12,6 +12,7 @@ open Microsoft.CodeAnalysis
 open Microsoft.CodeAnalysis.ExternalAccess.FSharp.Editor.FindUsages
 open Microsoft.VisualStudio.FSharp.Editor
 open Microsoft.VisualStudio.FSharp.Editor.CancellableTasks
+open FSharp.Compiler.CodeAnalysis
 open FSharp.Compiler.Text
 open FSharp.Editor.Tests.Helpers
 open FSharp.Test.ProjectGeneration
@@ -114,7 +115,7 @@ let private usesByDocument (document: Document) =
         checkFileResults.GetSymbolUseAtLocation(fcsLine, lexerSymbol.Ident.idRange.EndColumn, textLine.ToString(), lexerSymbol.FullIsland)
         |> Option.defaultWith (fun () -> failwith "symbol use not found")
 
-    SymbolHelpers.getSymbolUsesInSolution (symbolUse, checkFileResults, document)
+    SymbolHelpers.getSymbolUsesInSolution (symbolUse, checkFileResults, document, RelatedSymbolUseKind.All)
     |> CancellableTask.runSynchronouslyWithoutCancellation
 
 [<Theory>]
