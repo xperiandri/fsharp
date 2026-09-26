@@ -63,6 +63,11 @@ type internal FSharpNavigableItemsCache
     [<Literal>]
     let AnyDefines = "?"
 
+    /// The key for a parse made before the project's options arrived, with the editing defaults in place of its
+    /// defines. Not a define set any instance can have, for the same reason as `AnyDefines`.
+    [<Literal>]
+    let UnknownDefines = "??"
+
     do
         match workspace with
         | null -> ()
@@ -92,8 +97,13 @@ type internal FSharpNavigableItemsCache
                 | _ -> ValueNone
 
             match entry AnyDefines with
-            | ValueSome entry -> ValueSome entry
-            | ValueNone -> entry (definesOf document)
+            | ValueSome found -> ValueSome found
+            | ValueNone ->
+                match entry (definesOf document) with
+                | ValueSome found -> ValueSome found
+                // Only the search that runs while the solution loads takes this one: it is approximate, and the
+                // exact search refuses an approximate entry.
+                | ValueNone -> entry UnknownDefines
 
     let remember (document: Document) defines version approximate items =
         match document.FilePath with
@@ -110,10 +120,14 @@ type internal FSharpNavigableItemsCache
         let items = NavigateTo.GetNavigableItems parseTree
 
         let defines =
-            if dependsOnDefines parseTree then
-                definesOf document
-            else
+            if not (dependsOnDefines parseTree) then
                 AnyDefines
+            elif approximate then
+                // A project without its options yet parses with the editing defaults, which are nobody's defines:
+                // an instance whose own defines happen to equal them must not read this entry as its own parse.
+                UnknownDefines
+            else
+                definesOf document
 
         remember document defines version approximate items
         items
