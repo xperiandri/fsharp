@@ -57,6 +57,7 @@
     <Compile Include="MultiTargetFindReferencesTests.fs" />
     <Compile Include="NavigateToSearchWhileLoadingTests.fs" />
     <Compile Include="NavigateToPersistentCacheTests.fs" />
+    <Compile Include="FocusedCaretTests.fs" />
     <Compile Include="CodeFixes\CodeFixTestFramework.fs" />
     <Compile Include="ActivePatternEditorTests.fs" />
     <Compile Include="CodeFixes\AddInstanceMemberParameterTests.fs" />
