@@ -470,7 +470,7 @@ type private Engine(solution: Solution, kind: StructKind, toStruct: bool, userOp
             | ValueSome(struct (declaration, document)) ->
                 let! definition = this.Load document
                 this.Define definition declaration
-                let! uses = SymbolHelpers.getSymbolUses symbolUse source.Document source.Check
+                let! uses = SymbolHelpers.getSymbolUses symbolUse source.Document source.Check SymbolHelpers.codeSymbolUseKinds
 
                 for useDocument, useRange in uses do
                     if not (isDeclaration useRange declaration) then
@@ -492,7 +492,7 @@ type private Engine(solution: Solution, kind: StructKind, toStruct: bool, userOp
                 let! definition = this.Load document
                 this.DefineResult definition declaration
                 let groups = max 1 mfv.CurriedParameterGroups.Count
-                let! uses = SymbolHelpers.getSymbolUses functionUse source.Document source.Check
+                let! uses = SymbolHelpers.getSymbolUses functionUse source.Document source.Check SymbolHelpers.codeSymbolUseKinds
 
                 for useDocument, useRange in uses do
                     if not (isDeclaration useRange declaration) then
@@ -526,7 +526,7 @@ type private Engine(solution: Solution, kind: StructKind, toStruct: bool, userOp
                     | ValueSome ident -> this.EnqueueSymbol definition ident
                     | ValueNone -> ()
 
-                    let! uses = SymbolHelpers.getSymbolUses functionUse source.Document source.Check
+                    let! uses = SymbolHelpers.getSymbolUses functionUse source.Document source.Check SymbolHelpers.codeSymbolUseKinds
 
                     for useDocument, useRange in uses do
                         if not (isDeclaration useRange declaration) then
