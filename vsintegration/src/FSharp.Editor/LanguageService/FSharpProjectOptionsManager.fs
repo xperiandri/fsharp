@@ -296,17 +296,17 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
                     else
                         ValueNone
 
-                let getProjectOptionsFromScript () =
+                let getProjectOptionsFromScript (text: ISourceText) =
                     checker.GetProjectOptionsFromScript(
                         document.FilePath,
-                        sourceText.ToFSharpSourceText(),
+                        text,
                         ?caret = (focusedCaret |> ValueOption.toOption |> Option.bind _.Position),
                         previewEnabled = SessionsProperties.fsiPreview,
                         assumeDotNetFramework = not SessionsProperties.fsiUseNetCore,
                         userOpName = userOpName
                     )
 
-                let! scriptProjectOptions, _ = getProjectOptionsFromScript ()
+                let! scriptProjectOptions, _ = getProjectOptionsFromScript (sourceText.ToFSharpSourceText())
                 let project = document.Project
 
                 let otherOptions =
@@ -343,7 +343,7 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
 
                 let updateProjectOptions () =
                     async {
-                        let! scriptProjectOptions, _ = getProjectOptionsFromScript ()
+                        let! scriptProjectOptions, _ = getProjectOptionsFromScript (sourceText.Container.CurrentText.ToFSharpSourceText())
 
                         checker.NotifyFileChanged(document.FilePath, scriptProjectOptions)
                         |> Async.Start
