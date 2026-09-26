@@ -39,13 +39,33 @@ type internal LegacyProjectWorkspaceMap
     let foldersOf (projectDirectory: string) (file: string) =
         let directory = Path.GetDirectoryName file
 
-        if String.IsNullOrEmpty projectDirectory || String.IsNullOrEmpty directory then
+        let insideTheProject =
+            not (String.IsNullOrEmpty projectDirectory)
+            && not (String.IsNullOrEmpty directory)
+            && directory.Length > projectDirectory.Length
+            && directory[projectDirectory.Length] = Path.DirectorySeparatorChar
+            && directory.AsSpan(0, projectDirectory.Length).Equals(projectDirectory.AsSpan(), StringComparison.OrdinalIgnoreCase)
+
+        if not insideTheProject then
             Array.empty
-        elif directory.StartsWith(projectDirectory + string Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) then
-            directory.Substring(projectDirectory.Length)
-            |> _.Split([| Path.DirectorySeparatorChar; Path.AltDirectorySeparatorChar |], StringSplitOptions.RemoveEmptyEntries)
         else
-            Array.empty
+            // Every source file of the project comes through here on each recompute, so the path is read where it
+            // lies and only the folder names themselves are built.
+            let folders = ResizeArray()
+            let mutable rest = directory.AsSpan(projectDirectory.Length)
+
+            while not rest.IsEmpty do
+                match rest.IndexOfAny(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) with
+                | -1 ->
+                    folders.Add(rest.ToString())
+                    rest <- ReadOnlySpan.Empty
+                | separator ->
+                    if separator > 0 then
+                        folders.Add(rest.Slice(0, separator).ToString())
+
+                    rest <- rest.Slice(separator + 1)
+
+            folders.ToArray()
 
     let projectDisplayNameOf projectFileName =
         if String.IsNullOrWhiteSpace projectFileName then
