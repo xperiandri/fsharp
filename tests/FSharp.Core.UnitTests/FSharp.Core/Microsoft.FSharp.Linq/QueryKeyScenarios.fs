@@ -203,6 +203,50 @@ let private groupings () =
           "groupValBy a tuple of values"
           (fun db -> query { for c in db.Customers do groupValBy (c.Name, c.Age) c.City into g; select (g.Key, g.Count()) })
           (customers >> Seq.countBy _.City)
+
+      Scenario.rows
+          "groupValBy a tuple of values, sum of one of them"
+          (fun db -> query { for c in db.Customers do groupValBy (c.Name, c.Age) c.City into g; select (g.Key, g.Sum(fun (_, age) -> age)) })
+          (customers >> Seq.groupBy _.City >> Seq.map (fun (city, group) -> city, group |> Seq.sumBy _.Age))
+
+      Scenario.rows
+          "groupValBy a tuple of values, average of one of them"
+          (fun db -> query { for c in db.Customers do groupValBy (c.Name, c.Age) c.City into g; select (g.Key, g.Average(fun (_, age) -> float age)) })
+          (customers >> Seq.groupBy _.City >> Seq.map (fun (city, group) -> city, group |> Seq.averageBy (fun c -> float c.Age)))
+
+      Scenario.rows
+          "groupValBy a tuple of values, max of one of them"
+          (fun db -> query { for c in db.Customers do groupValBy (c.Name, c.Age) c.City into g; select (g.Key, g.Max(fun (_, age) -> age)) })
+          (customers >> Seq.groupBy _.City >> Seq.map (fun (city, group) -> city, group |> Seq.map _.Age |> Seq.max))
+
+      Scenario.rows
+          "groupValBy a tuple of values, one of them selected then summed"
+          (fun db -> query { for c in db.Customers do groupValBy (c.Name, c.Age) c.City into g; select (g.Key, g.Select(fun (_, age) -> age).Sum()) })
+          (customers >> Seq.groupBy _.City >> Seq.map (fun (city, group) -> city, group |> Seq.sumBy _.Age))
+
+      Scenario.rows
+          "groupValBy a tuple of values, counted with a predicate"
+          (fun db -> query { for c in db.Customers do groupValBy (c.Name, c.Age) c.City into g; select (g.Key, g.Count(fun (_, age) -> age > 26)) })
+          (customers >> Seq.groupBy _.City >> Seq.map (fun (city, group) -> city, group |> Seq.filter (fun c -> c.Age > 26) |> Seq.length))
+
+      Scenario.rows
+          "groupBy after a join, key and count"
+          (fun db -> query { for c in db.Customers do join o in db.Orders on (c.Id = o.CustomerId); groupBy c.City into g; select (g.Key, g.Count()) })
+          (fun data -> seq { for c in data.Customers do for _ in c.Orders -> c.City } |> Seq.countBy id)
+
+      Scenario.rows
+          "groupBy after a join, sum over the joined side"
+          (fun db ->
+              query { for c in db.Customers do join o in db.Orders on (c.Id = o.CustomerId); groupBy c.City into g; select (g.Key, g.Sum(fun (_, o) -> o.Total)) })
+          (fun data -> seq { for c in data.Customers do for o in c.Orders -> c.City, o.Total } |> Seq.groupBy fst |> Seq.map (fun (city, totals) -> city, Seq.sumBy snd totals))
+
+      Scenario.rows
+          "groups after a join as the result"
+          (fun db -> query { for c in db.Customers do join o in db.Orders on (c.Id = o.CustomerId); groupBy c.City })
+          (fun data ->
+              seq { for c in data.Customers do for o in c.Orders -> c, o }
+              |> Seq.groupBy (fun (c, _) -> c.City)
+              |> Seq.map (fun (city, group) -> Grouping(city, group) :> IGrouping<_, _>))
       |> Scenario.violating [ Violation.RuntimeHelperCall "new Grouping`2" ] ]
 
 let cases () = joins () @ groupings ()
