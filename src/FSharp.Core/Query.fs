@@ -999,9 +999,17 @@ module Query =
         | ExprShape.ShapeLambda(_, body) -> countOccurrences v body
         | ExprShape.ShapeCombination(_, args) -> List.sumBy (countOccurrences v) args
 
+    let (|CallFst|_|) = (|SpecificCallToMethod|_|) (methodhandleof (fun (x: int * int) -> fst x))
+
+    let (|CallSnd|_|) = (|SpecificCallToMethod|_|) (methodhandleof (fun (x: int * int) -> snd x))
+
     let (|MacroReduction|_|) (p: Expr) =
 
         match p with
+        // Macro - fst and snd read the tuple, so that a tuple the query translator rebuilds is read directly
+        | CallFst (None, _, [tuple]) -> Some (Expr.TupleGet (tuple, 0))
+        | CallSnd (None, _, [tuple]) -> Some (Expr.TupleGet (tuple, 1))
+
         | Applications(Lambdas(vs, body), args)
             when vs.Length = args.Length
                  && (vs, args) ||> List.forall2 (fun vs args -> vs.Length = args.Length) ->
