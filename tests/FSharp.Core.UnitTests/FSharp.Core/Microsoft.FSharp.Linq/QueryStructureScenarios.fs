@@ -308,7 +308,7 @@ let private finalProjections () =
           "anonymous record selected after join"
           (fun db -> query { for c in db.Customers do join o in db.Orders on (c.Id = o.CustomerId); select {| Name = c.Name; Total = o.Total |} })
           (fun data -> seq { for c in data.Customers do for o in c.Orders -> {| Name = c.Name; Total = o.Total |} })
-      |> Scenario.flat [ "Join"; "Select"; "Select" ]
+      |> Scenario.flat [ "Join"; "Select" ]
 
       Scenario.rows
           "nested tuple selected"
@@ -327,7 +327,6 @@ let private finalProjections () =
           (fun db -> query { for c in db.Customers do groupBy c.City into g; select (g.Key, g.Count()) })
           (customers >> Seq.countBy _.City)
       |> Scenario.flat [ "GroupBy"; "Select" ] ]
-
 
 let private consumers () =
     let totals (data: Data) = data.Orders |> List.map _.Total
@@ -366,7 +365,6 @@ let private consumers () =
           "exists after a tuple select"
           (fun db -> query { for c in db.Customers do select (c.City, c.Age) into t; exists (match t with city, age -> city = "Paris" && age < 30) })
           (fun _ -> true)
-      |> Scenario.violating [ Violation.Statement System.Linq.Expressions.ExpressionType.Block ]
 
       Scenario.rows
           "nested query of records as the source"
@@ -377,7 +375,7 @@ let private consumers () =
                   select p.PersonName
               })
           (fun data -> data.Customers |> Seq.filter (fun c -> c.Age > 26) |> Seq.map _.Name)
-      |> Scenario.flat [ "Select"; "Select"; "Where"; "Select" ]
+      |> Scenario.flat [ "Select"; "Where"; "Select" ]
 
       Scenario.rows
           "nested query with where and sortBy as the source"
