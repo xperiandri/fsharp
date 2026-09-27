@@ -120,27 +120,27 @@ module QueryExecutionOverIQueryable =
         
     checkLinqQueryText "ltcjhnwecw" 
         (query { let q = query { for i in db do if i.Data = 8 then for j in db do if i.Data = j.Data then yield i.Name } in for v in q do yield v })  
-        "db.Where(_arg1 => (_arg1.Data == 8)).SelectMany(_arg1 => db.Where(_arg2 => (_arg1.Data == _arg2.Data)), (_arg1, _arg2) => _arg1.Name).Select(_arg3 => _arg3)"
+        "db.Where(_arg1 => (_arg1.Data == 8)).SelectMany(_arg1 => db.Where(_arg2 => (_arg1.Data == _arg2.Data)), (_arg1, _arg2) => _arg1.Name)"
 
     checkLinqQueryText "ltcjhnwec8" 
         (query { let q = query { for i in db do for j in db do yield i.Name } in for v in q do yield v })   
-        "db.SelectMany(_arg1 => db, (_arg1, _arg2) => _arg1.Name).Select(_arg3 => _arg3)"
+        "db.SelectMany(_arg1 => db, (_arg1, _arg2) => _arg1.Name)"
 
     checkLinqQueryText "ltcjhnwec9" 
         (query { let q = query { for i in db do for j in db do if i.Data = j.Data then yield i.Name } in for v in q do yield v })  
-        "db.SelectMany(_arg1 => db.Where(_arg2 => (_arg1.Data == _arg2.Data)), (_arg1, _arg2) => _arg1.Name).Select(_arg3 => _arg3)"
+        "db.SelectMany(_arg1 => db.Where(_arg2 => (_arg1.Data == _arg2.Data)), (_arg1, _arg2) => _arg1.Name)"
 
     checkLinqQueryText "ltcjhnwec3" 
         (query { for v in query { for i in db -> i } do yield v })  
-        "db.Select(_arg1 => _arg1).Select(_arg2 => _arg2)"
+        "db.Select(_arg2 => _arg2)"
 
     checkLinqQueryText "ltcjhnwec4" 
         (query { let q = query { for i in db -> i } in for v in q do yield v })  
-        "db.Select(_arg1 => _arg1).Select(_arg2 => _arg2)"
+        "db.Select(_arg2 => _arg2)"
 
     checkLinqQueryText "ltcjhnwec6" 
         (query { let q = query { for i in db -> i.Name } in for v in q do yield v } )  
-        "db.Select(_arg1 => _arg1.Name).Select(_arg2 => _arg2)"
+        "db.Select(_arg1 => _arg1.Name)"
 
     open FSharp.Reflection
 
@@ -223,7 +223,7 @@ module QueryExecutionOverIQueryable =
 
     checkLinqQueryText "ltcjhnwecg" 
         (query { let q = query { for i in db do for j in db do where true; take 3; select i } in for v in q do yield v } )  
-        "db.SelectMany(_arg1 => db, (_arg1, _arg2) => new AnonymousObject`2(Item1 = _arg1, Item2 = _arg2)).Where(tupledArg => True).Take(3).Select(tupledArg => tupledArg.Item1).Select(_arg3 => _arg3)"
+        "db.SelectMany(_arg1 => db, (_arg1, _arg2) => new AnonymousObject`2(Item1 = _arg1, Item2 = _arg2)).Where(tupledArg => True).Take(3).Select(tupledArg => tupledArg.Item1)"
 
 
 
@@ -258,7 +258,7 @@ module QueryExecutionOverIQueryable =
 
     checkLinqQueryText "ltcjhnwecz" 
         (query { let q = query { for i in db do select i.Name into n; distinct } in for v in q do yield v }) 
-        "db.Select(i => i.Name).Distinct().Select(_arg3 => _arg3)"
+        "db.Select(i => i.Name).Distinct()"
 
     checkCommuteSeq "cnewnc06ya" 
         (query { for i in db do select i }) 

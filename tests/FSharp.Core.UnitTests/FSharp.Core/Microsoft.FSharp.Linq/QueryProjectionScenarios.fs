@@ -73,7 +73,6 @@ let cases () =
                   select name
               })
           (customers >> Seq.filter (fun c -> c.Id > 1) >> Seq.map _.Name)
-      |> Scenario.violating [ Violation.ReadsUnnamedMember "Tuple`2" ]
 
       Scenario.rows
           "struct tuple taken apart by the next for"
@@ -84,7 +83,6 @@ let cases () =
                   select name
               })
           (customers >> Seq.filter (fun c -> c.Id > 1) >> Seq.map _.Name)
-      |> Scenario.violating [ Violation.ReadsUnnamedMember "ValueTuple`2" ]
 
       Scenario.rows
           "record, fields in declaration order"
