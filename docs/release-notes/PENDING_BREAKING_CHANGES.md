@@ -63,6 +63,18 @@ A record that a `query` selects with its fields written out of order is converte
 
 Every other let keeps its `Block` and is evaluated once, where it is written: a value that is computed by a call and read more than once, by a nested lambda or after something else has run, a struct of your own or a boxed value, a `mutable` variable, and every let of a lambda that assigns, sets a property or field, or runs a statement. A value that a call makes anew, like the `let upper = p.Name.ToUpper()` above, is kept as well when it is used more than once and a use can tell one object from another, as `obj.ReferenceEquals(upper, upper)` does. A let outside such a lambda keeps its `Block` in `EvaluateQuotation` and `QuotationToExpression`; inside a lambda that goes to a provider it is replaced the same way whichever of them converts it: `EvaluateQuotation <@ people.Select(fun x -> let n = x.Name in n + n).ToArray() @>` reads `Name` twice.
 
+### Nested lambdas that read a parameter of the outer lambda are quoted
+
+Inside a lambda handed to a LINQ provider, a lambda passed as `Expression<Func<..>>` that reads a parameter of the outer lambda is now a `Quote` of the converted lambda, as in C#, instead of a call that converts its quotation when the outer tree runs.
+
+```fsharp
+db.Customers.Where(fun c -> db.Orders.Any(fun o -> o.CustomerId = c.Id))
+// Was: c => Orders.Any(QuotationToLambdaExpression(SubstHelper(<quotation>, [c], [c])))
+// Now: c => Orders.Any(o => o.CustomerId == c.Id)
+```
+
+**Impact:** When such a tree is compiled and run, the nested lambda reads the outer parameter through a closure where it used to get its value as a constant. A let of the outer lambda that names a member of its parameter is read by the nested lambda when that lambda runs. A nested lambda that reads no parameter of the outer lambda is converted as before, and so is one that cannot be converted.
+
 ### Array access uses ArrayIndex
 
 ```fsharp
