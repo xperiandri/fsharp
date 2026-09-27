@@ -400,6 +400,8 @@ module LeafExpressionConverter =
     let (|MemberInitializationHelperQ|_|) = (|SpecificCallToMethod|_|) (methodhandleof MemberInitializationHelper)
     let (|NewAnonymousObjectHelperQ|_|) = (|SpecificCallToMethod|_|) (methodhandleof NewAnonymousObjectHelper)
     let (|ArrayLookupQ|_|) = (|SpecificCallToMethod|_|) (methodhandleof (fun (x, y) -> LanguagePrimitives.IntrinsicFunctions.GetArray x y))
+    // QuotationToLambdaExpression is defined after the converter, so it cannot be named with methodhandleof here.
+    let (|QuotationToLambdaExpressionQ|_|) = SpecificCallToMethodInfo (typeof<ConvEnv>.DeclaringType.GetMethod "QuotationToLambdaExpression")
 
     //let (|ArrayAssignQ|_|) = (|SpecificCallToMethod|_|) (methodhandleof (fun -> LanguagePrimitives.IntrinsicFunctions.SetArray : int array -> int -> int -> unit))
     //let (|ArrayTypeQ|_|) (ty:System.Type) = if ty.IsArray && ty.GetArrayRank() = 1 then Some (ty.GetElementType()) else None
@@ -654,6 +656,11 @@ module LeafExpressionConverter =
             // Throw away markers inserted to satisfy C#'s design where they pass an argument
             // or type T to an argument expecting Expression<T>.
             | ImplicitExpressionConversionHelperQ (_, GenericArgs [|_|], [x1]) -> ConvExprToLinqInContext { env with inExpressionLambda = true } x1
+
+            // The compiler turns a lambda passed where Expression<T> is expected into a call that converts
+            // its quotation at run time. Inside a tree, C# quotes the nested lambda instead.
+            | QuotationToLambdaExpressionQ (None, _, [ QuoteTyped (NewDelegate _ as lambda) ]) ->
+                Expression.Quote(ConvExprToLinqInContext { env with inExpressionLambda = true } lambda) |> asExpr
 
             // Use witnesses if they are available
             | CallWithWitnesses (objArgOpt, _, minfo2, witnessArgs, args) ->

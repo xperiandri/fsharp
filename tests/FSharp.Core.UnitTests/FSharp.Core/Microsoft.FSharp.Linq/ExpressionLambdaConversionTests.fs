@@ -7,6 +7,9 @@ open System.Linq.Expressions
 open Xunit
 open Microsoft.FSharp.Linq.RuntimeHelpers
 
+type LinqExpr =
+    static member FromFunc<'T, 'U>(e: Expression<Func<'T, 'U>>) = e
+
 type private Counter() =
     let mutable calls = 0
     member _.Calls = calls
@@ -53,6 +56,26 @@ let ``Assigned mutable variable stays a block in an expression lambda`` () =
 
     Assert.Equal(ExpressionType.Block, (bodyOf lambda).NodeType)
     Assert.Equal(6, lambda.Compile().Invoke 5)
+
+[<Fact>]
+let ``Lambda nested in an expression lambda is quoted`` () =
+    let lambda =
+        LeafExpressionConverter.QuotationToLambdaExpression <@ Func<int, Expression<Func<int, int>>>(fun x -> LinqExpr.FromFunc(fun y -> y + x)) @>
+
+    match bodyOf lambda with
+    | :? MethodCallExpression as call ->
+        Assert.Equal(nameof LinqExpr.FromFunc, call.Method.Name)
+        Assert.Equal(ExpressionType.Quote, call.Arguments.[0].NodeType)
+        Assert.Equal(ExpressionType.Lambda, (call.Arguments.[0] :?> UnaryExpression).Operand.NodeType)
+    | body -> Assert.Fail $"Expected a call of FromFunc, got {body}"
+
+    Assert.Equal(3, lambda.Compile().Invoke(1).Compile().Invoke 2)
+
+[<Fact>]
+let ``Lambda nested in an evaluated quotation is quoted`` () =
+    let inner = LeafExpressionConverter.EvaluateQuotation <@ LinqExpr.FromFunc(fun y -> y + 1) @> :?> Expression<Func<int, int>>
+    Assert.Equal(ExpressionType.Add, inner.Body.NodeType)
+    Assert.Equal(3, inner.Compile().Invoke 2)
 
 [<Fact>]
 let ``EvaluateQuotation still evaluates a let once`` () =
