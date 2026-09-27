@@ -267,6 +267,17 @@ let private leftJoins () =
       |> Scenario.flat [ "GroupJoin"; "SelectMany"; "Select"; "Select" ]
 
       Scenario.rows
+          "group of a leftOuterJoin counted"
+          (fun db ->
+              query {
+                  for c in db.Customers do
+                  leftOuterJoin o in db.Orders on (c.Id = o.CustomerId) into orders
+                  select (c.Name, orders.Count())
+              })
+          (fun data -> seq { for c in data.Customers -> c.Name, max 1 c.Orders.Count })
+      |> Scenario.flat [ "GroupJoin"; "Select"; "Select"; "Select" ]
+
+      Scenario.rows
           "two left joins spelled leftOuterJoin"
           (fun db ->
               query {
