@@ -31,7 +31,10 @@ module LeafExpressionConverter =
 
     [<NoEquality; NoComparison>]
     type ConvEnv =
-        {   varEnv : Map<Var, Expression> }
+        {   varEnv : Map<Var, Expression>
+            /// Inside a lambda that a LINQ provider receives as an expression tree, which, like a C# expression
+            /// lambda, must not contain statements.
+            inExpressionLambda : bool }
     let asExpr x = (x :> Expression)
 
     let isNamedType(typ:Type) = not (typ.IsArray || typ.IsByRef || typ.IsPointer)
@@ -431,6 +434,55 @@ module LeafExpressionConverter =
       | NewObject(c, [arg]) when equivHeadTypes c.DeclaringType typeof<Nullable<int>> -> Some arg
       | _ -> None
 
+    /// Whether the expression assigns or runs statements, which no provider translates
+    let rec hasStatements (expr: Expr) =
+        match expr with
+        | VarSet _
+        | PropertySet _
+        | FieldSet _
+        | AddressSet _
+        | Sequential _
+        | WhileLoop _
+        | ForIntegerRangeLoop _
+        | TryWith _
+        | TryFinally _ -> true
+        | ExprShape.ShapeVar _ -> false
+        | ExprShape.ShapeLambda (_, body) -> hasStatements body
+        | ExprShape.ShapeCombination (_, args) -> List.exists hasStatements args
+
+    let rec countUses (v: Var) (expr: Expr) =
+        match expr with
+        | ExprShape.ShapeVar used -> if used = v then 1 else 0
+        | ExprShape.ShapeLambda (_, body) -> countUses v body
+        | ExprShape.ShapeCombination (_, args) -> List.sumBy (countUses v) args
+
+    /// Whether the expression can be left out, or repeated, without anyone noticing
+    let rec isVariableOrElement (expr: Expr) =
+        match expr with
+        | Var _
+        | Value _ -> true
+        | TupleGet (tuple, _) -> isVariableOrElement tuple
+        | Coerce (inner, _) -> isVariableOrElement inner
+        | _ -> false
+
+    /// Whether 'let v = e in b' may become 'b' with 'e' in place of 'v'. A provider needs that form, and it computes
+    /// the same as long as nothing is written between the binding and the reads, 'e' is still evaluated once the
+    /// variable is not read, and an object that 'e' creates is not read twice as two objects. What remains is that
+    /// 'e' runs where 'v' is read: once for each read, and only on the paths that read it.
+    let canSubstituteLet (v: Var) (e: Expr) (b: Expr) =
+        let createsObject =
+            match e with
+            | NewObject (ctor, _) -> not ctor.DeclaringType.IsValueType
+            | _ -> false
+
+        (not v.IsMutable || String.Equals (v.Name, "copyOfStruct", StringComparison.Ordinal))
+        && not (hasStatements e)
+        && not (hasStatements b)
+        && (match countUses v b with
+            | 0 -> isVariableOrElement e
+            | 1 -> true
+            | _ -> not createsObject)
+
     /// Convert F# quotations to LINQ expression trees.
     /// A more polished LINQ-Quotation translator will be published
     /// concert with later versions of LINQ.
@@ -643,7 +695,7 @@ module LeafExpressionConverter =
 
             // Throw away markers inserted to satisfy C#'s design where they pass an argument
             // or type T to an argument expecting Expression<T>.
-            | ImplicitExpressionConversionHelperQ (_, GenericArgs [|_|], [x1]) -> ConvExprToLinqInContext env x1
+            | ImplicitExpressionConversionHelperQ (_, GenericArgs [|_|], [x1]) -> ConvExprToLinqInContext { env with inExpressionLambda = true } x1
 
             // Use witnesses if they are available
             | CallWithWitnesses (objArgOpt, _, minfo2, witnessArgs, args) ->
@@ -743,7 +795,7 @@ module LeafExpressionConverter =
 
         | NewDelegate(delegateTy, vs, b) ->
             let vsP = List.map ConvVarToLinq vs
-            let env = { varEnv = List.foldBack2 (fun (v:Var) vP -> Map.add v (vP |> asExpr)) vs vsP env.varEnv }
+            let env = { env with varEnv = List.foldBack2 (fun (v:Var) vP -> Map.add v (vP |> asExpr)) vs vsP env.varEnv }
             let bodyP = ConvExprToLinqInContext env b
             Expression.Lambda(delegateTy, bodyP, vsP) |> asExpr
 
@@ -784,6 +836,12 @@ module LeafExpressionConverter =
                                (Expression.NewArrayInit(typeof<obj>, [| for fv in fvs -> Expression.Convert(env.varEnv.[fv], typeof<obj>) |> asExpr |]) |> asExpr) |])
                     |> asExpr
 
+        | Let (v, e, b) when env.inExpressionLambda && canSubstituteLet v e b ->
+            let eP = ConvExprToLinqInContext env e
+            // The Coerce case drops reference upcasts, and uses of the variable may need its own type.
+            let eP = if Type.op_Equality(eP.Type, v.Type) then eP else Expression.Convert(eP, v.Type) |> asExpr
+            ConvExprToLinqInContext { env with varEnv = Map.add v eP env.varEnv } b
+
         | Let (v, e, b) ->
             // Use Expression.Block to properly scope the variable. This:
             // 1. Evaluates the expression exactly once (preserving reference semantics)
@@ -791,14 +849,14 @@ module LeafExpressionConverter =
             // 3. Works for both mutable and immutable variables
             let vP = ConvVarToLinq v
             let eP = ConvExprToLinqInContext env e
-            let envinner = { varEnv = Map.add v (vP |> asExpr) env.varEnv }
+            let envinner = { env with varEnv = Map.add v (vP |> asExpr) env.varEnv }
             let bodyP = ConvExprToLinqInContext envinner b
             // Create a block with the variable declaration, initial assignment, and body
             Expression.Block([| vP |], Expression.Assign(vP, eP), bodyP) |> asExpr
 
         | Lambda(v, body) ->
             let vP = ConvVarToLinq v
-            let env = { varEnv = Map.add v (vP |> asExpr) env.varEnv }
+            let env = { env with varEnv = Map.add v (vP |> asExpr) env.varEnv }
             let bodyP = ConvExprToLinqInContext env body
             let lambdaTy, tyargs =
                 if bodyP.Type = typeof<Void> then
@@ -946,10 +1004,11 @@ module LeafExpressionConverter =
         //printf "** Expression .Parameter(%a, %a)\n" output_any ty output_any nm
         Expression.Parameter(v.Type, v.Name)
 
-    let ConvExprToLinq (e: Expr) = ConvExprToLinqInContext { varEnv = Map.empty } e
+    let ConvExprToLinq (e: Expr) = ConvExprToLinqInContext { varEnv = Map.empty; inExpressionLambda = false } e
 
     let QuotationToExpression (e: Expr) = ConvExprToLinq e
-    let QuotationToLambdaExpression (e: Microsoft.FSharp.Quotations.Expr<'T>) =  (ConvExprToLinq e) :?> Expression<'T>
+    let QuotationToLambdaExpression (e: Microsoft.FSharp.Quotations.Expr<'T>) =
+        ConvExprToLinqInContext { varEnv = Map.empty; inExpressionLambda = true } e :?> Expression<'T>
 
     // This contorted compilation is used because LINQ's "Compile" is only allowed on lambda expressions, and LINQ
     // provides no other way to evaluate the expression.
