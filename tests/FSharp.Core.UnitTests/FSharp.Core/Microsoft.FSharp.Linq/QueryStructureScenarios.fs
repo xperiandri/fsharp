@@ -328,4 +328,71 @@ let private finalProjections () =
           (customers >> Seq.countBy _.City)
       |> Scenario.flat [ "GroupBy"; "Select" ] ]
 
-let cases () = loops () @ subqueries () @ leftJoins () @ finalProjections ()
+
+let private consumers () =
+    let totals (data: Data) = data.Orders |> List.map _.Total
+    let discounts (data: Data) = data.Lines |> List.filter _.Discount.HasValue |> List.map _.Discount.Value
+
+    [ Scenario.value "all over two for" (fun db -> query { for c in db.Customers do for o in c.Orders do all (o.Total >= 0.0) }) (fun _ -> true)
+
+      Scenario.value "sumBy over two for" (fun db -> query { for c in db.Customers do for o in c.Orders do sumBy o.Total }) (totals >> List.sum)
+
+      Scenario.value
+          "averageBy after a join"
+          (fun db -> query { for c in db.Customers do join o in db.Orders on (c.Id = o.CustomerId); averageBy o.Total })
+          (totals >> List.average)
+
+      Scenario.value
+          "minByNullable over two for"
+          (fun db -> query { for o in db.Orders do for l in o.Lines do minByNullable l.Discount })
+          (discounts >> List.min >> System.Nullable)
+
+      Scenario.value
+          "sumByNullable after a join"
+          (fun db -> query { for o in db.Orders do join l in db.Lines on (o.Id = l.OrderId); sumByNullable l.Discount })
+          (discounts >> List.sum >> System.Nullable)
+
+      Scenario.value
+          "maxBy after a record select"
+          (fun db -> query { for c in db.Customers do select { PersonName = c.Name; PersonAge = c.Age } into p; maxBy p.PersonAge })
+          (fun data -> data.Customers |> List.map _.Age |> List.max)
+
+      Scenario.value
+          "exists after a record select"
+          (fun db -> query { for c in db.Customers do select { PersonName = c.Name; PersonAge = c.Age } into p; exists (p.PersonAge > 30) })
+          (fun _ -> true)
+
+      Scenario.value
+          "exists after a tuple select"
+          (fun db -> query { for c in db.Customers do select (c.City, c.Age) into t; exists (match t with city, age -> city = "Paris" && age < 30) })
+          (fun _ -> true)
+      |> Scenario.violating [ Violation.Statement System.Linq.Expressions.ExpressionType.Block ]
+
+      Scenario.rows
+          "nested query of records as the source"
+          (fun db ->
+              query {
+                  for p in (query { for c in db.Customers do select { PersonName = c.Name; PersonAge = c.Age } }) do
+                  where (p.PersonAge > 26)
+                  select p.PersonName
+              })
+          (fun data -> data.Customers |> Seq.filter (fun c -> c.Age > 26) |> Seq.map _.Name)
+      |> Scenario.flat [ "Select"; "Select"; "Where"; "Select" ]
+
+      Scenario.rows
+          "nested query with where and sortBy as the source"
+          (fun db -> query { for n in (query { for c in db.Customers do where (c.Age > 26); sortBy c.Name; select c.Name }) do select n })
+          (fun data -> data.Customers |> Seq.filter (fun c -> c.Age > 26) |> Seq.sortBy _.Name |> Seq.map _.Name)
+      |> Scenario.ordered
+
+      Scenario.rows
+          "nested query of tuples as the source of a join"
+          (fun db ->
+              query {
+                  for (id, name) in (query { for c in db.Customers do select (c.Id, c.Name) }) do
+                  join o in db.Orders on (id = o.CustomerId)
+                  select (name, o.Id)
+              })
+          (fun data -> seq { for c in data.Customers do for o in c.Orders -> c.Name, o.Id }) ]
+
+let cases () = loops () @ subqueries () @ leftJoins () @ finalProjections () @ consumers ()
