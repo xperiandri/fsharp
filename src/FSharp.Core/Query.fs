@@ -1181,21 +1181,75 @@ module Query =
 
             assert (mutExpr.Type.GetGenericTypeDefinition() = typedefof<IGrouping<_, _>>)
             let mutElemTy = mutExpr.Type.GetGenericArguments().[1]
-            let immutIGroupingTy = typedefof<IGrouping<_, _>>.MakeGenericType [| immutKeyTy; immutElemTy |]
-            let immutGroupingTy = typedefof<Grouping<_, _>>.MakeGenericType [| immutKeyTy; immutElemTy |]
+            let rebuiltGroupingsTy = typedefof<RebuiltGroupings<_, _>>.MakeGenericType [| immutKeyTy; immutElemTy |]
             // Generate "source.Select(fun v -> ...)" (remembering that Select is an extension member, i.e. static)
             let var = new Var("v", mutElemTy)
             let convExpr = ConvMutableToImmutable conv (Expr.Var var)
 
-            // Construct an IGrouping
+            // Construct an IGrouping. A query can mention a group in several places, and each of them rebuilds it:
+            // all have to give the same object, so the rebuilt groupings are kept by the grouping they come from.
             let args =
-              [ Expr.PropertyGet (mutExpr, mutExpr.Type.GetProperty "Key")
+              [ Expr.Coerce (mutExpr, typeof<obj>)
+                Expr.PropertyGet (mutExpr, mutExpr.Type.GetProperty "Key")
                 MakeSelect(CanEliminate.Yes, false, mutExpr, var, convExpr) ]
 
-            Expr.Coerce (Expr.NewObject (immutGroupingTy.GetConstructors().[0], args), immutIGroupingTy)
+            Expr.Call (rebuiltGroupingsTy.GetMethod("Of", BindingFlags.Static ||| BindingFlags.Public ||| BindingFlags.NonPublic), args)
 
         | NoConv ->
             mutExpr
+
+    let (|RebuiltGroupingOf|_|) (expr: Expr) =
+        match expr with
+        | Call (None, rebuild, [ source; key; elements ])
+            when rebuild.DeclaringType.IsGenericType
+                 && rebuild.DeclaringType.GetGenericTypeDefinition() = typedefof<RebuiltGroupings<_, _>> ->
+            Some (source, key, elements)
+        | _ -> None
+
+    /// A group that an expression mentions in one place only, and not in a lambda, is one object without being
+    /// kept. It is built there as it always was, which is a construction a provider may know how to make.
+    let BuildLoneGroupsPlainly (expr: Expr) =
+        let mentions = ResizeArray<struct (Expr * bool)>()
+
+        let rec collect inLambda (e: Expr) =
+            match e with
+            | RebuiltGroupingOf (source, _, _) -> mentions.Add (struct (source, inLambda))
+            | _ -> ()
+
+            match e with
+            | ExprShape.ShapeLambda (_, body) -> collect true body
+            | ExprShape.ShapeCombination (_, args) ->
+                let inLambda =
+                    inLambda
+                    || (match e with
+                        | NewDelegate _ -> true
+                        | _ -> false)
+
+                List.iter (collect inLambda) args
+            | ExprShape.ShapeVar _ -> ()
+
+        collect false expr
+
+        let isLone (source: Expr) =
+            let mutable places = 0
+            let mutable inLambda = false
+
+            for struct (other, otherInLambda) in mentions do
+                if other = source then
+                    places <- places + 1
+                    inLambda <- inLambda || otherInLambda
+
+            places = 1 && not inLambda
+
+        let rec rebuild (e: Expr) =
+            match e with
+            | RebuiltGroupingOf (source, key, elements) when isLone source ->
+                let groupingTy = typedefof<Grouping<_, _>>.MakeGenericType (e.Type.GetGenericArguments())
+                Expr.Coerce (Expr.NewObject (groupingTy.GetConstructors().[0], [ key; elements ]), e.Type)
+            | ExprShape.ShapeCombination (shape, (_ :: _ as args)) -> ExprShape.RebuildShapeCombination (shape, List.map rebuild args)
+            | _ -> e
+
+        if mentions.Count = 0 then expr else rebuild expr
 
     /// Given the expressions for a function (fun immutConsumingVar -> immutConsumingExpr) operating over immutable tuple and record
     /// types, build the expressions for an equivalent function (fun mutConsumingVar -> mutConsumingExpr) which will operate over mutable data, where the given conversion
@@ -1217,8 +1271,22 @@ module Query =
         let immutConsumingVarReplacementExpr = ConvMutableToImmutable conv (Expr.Var mutConsumingVar)
         let mutConsumingExprBeforeSimplification = immutConsumingExpr.Substitute (fun v -> if v = immutConsumingVar then Some immutConsumingVarReplacementExpr else None)
 
-        let mutConsumingExpr = SimplifyConsumingExpr mutConsumingExprBeforeSimplification
+        let mutConsumingExpr = SimplifyConsumingExpr mutConsumingExprBeforeSimplification |> BuildLoneGroupsPlainly
         mutConsumingVar, mutConsumingExpr
+
+    /// Whether 'expr' is 'original' itself, or the elements of the tuple 'original' put back together in order.
+    let rec IsSameValue (original: Expr) (expr: Expr) =
+        match expr with
+        | NewTuple elements when Type.op_Equality(expr.Type, original.Type) ->
+            elements |> List.indexed |> List.forall (fun (i, element) -> IsSameValue (Expr.TupleGet(original, i)) element)
+        | _ -> expr = original
+
+    /// A 'yield' or 'select' of the element itself hands converted elements on as the provider produced them,
+    /// rather than rebuilding each of them, and each grouping, in the middle of the query.
+    let YieldsConvertedElementItself sourceConv (immutVar: Var, immutBody: Expr) =
+        match sourceConv with
+        | NoConv -> false
+        | _ -> IsSameValue (Expr.Var immutVar) (MacroExpand immutBody)
 
     let (|AnyNestedQuery|_|) e =
         match e with
@@ -1301,6 +1369,9 @@ module Query =
             let rec TransFor mutSource immutSelector =
                 match immutSelector with
 
+                | CallQueryBuilderYield(_, _, immutSelectorBody) when YieldsConvertedElementItself sourceConv (immutSelectorVar, immutSelectorBody) ->
+                    mutSource, sourceConv
+
                 // query.For (source, (fun selectorVar -> yield res)) @>
                 //    ~~> TRANS(source.Select(selectorVar -> res)
                 | CallQueryBuilderYield(_, _, immutSelectorBody) ->
@@ -1366,11 +1437,14 @@ module Query =
 
         | CallSelect (_, [_; qTy; _], mutSource, Lambda(immutSelectorVar, immutSelectorBody)) ->
 
-            let mutSource, _sourceConv, mutSelectorVar, mutSelectorBody = TransInnerApplicative check mutSource (immutSelectorVar, immutSelectorBody)
-            let mutSelectorBody, selectorConv = ProduceMoreMutables TransInnerNoCheck mutSelectorBody
-            let mutSelectorBody = CleanupLeaf mutSelectorBody
+            let mutSource, sourceConv, mutSelectorVar, mutSelectorBody = TransInnerApplicative check mutSource (immutSelectorVar, immutSelectorBody)
+            if YieldsConvertedElementItself sourceConv (immutSelectorVar, immutSelectorBody) then
+                mutSource, sourceConv
+            else
+                let mutSelectorBody, selectorConv = ProduceMoreMutables TransInnerNoCheck mutSelectorBody
+                let mutSelectorBody = CleanupLeaf mutSelectorBody
 
-            TransInnerResult.MakeSelect(canElim, qTyIsIQueryable qTy, mutSource, mutSelectorVar, mutSelectorBody), selectorConv
+                TransInnerResult.MakeSelect(canElim, qTyIsIQueryable qTy, mutSource, mutSelectorVar, mutSelectorBody), selectorConv
 
         | CallQueryBuilderYieldFrom (_, _, [source]) -> TransInner canElim check source
 
@@ -1687,7 +1761,15 @@ module Query =
                 assert immutSourceTy.IsGenericType
                 assert (IsQuerySourceTy immutSourceTy || IsIQueryableTy immutSourceTy || IsIEnumerableTy immutSourceTy)
                 immutSource.Type.GetGenericArguments().[0]
-            let immutVar = Var("after", immutSourceElemTy)
+            // What reads the elements of a join or a second 'for' used to be the lambda of the query's next
+            // operator, which the compiler names 'tupledArg'. Providers written for F# queries know those
+            // elements by that name, so the conversion bears it where it is the one to read them.
+            let name =
+                match mutSource with
+                | Call (_, source, _) when source.Name = "Select" -> "after"
+                | _ -> "tupledArg"
+
+            let immutVar = Var(name, immutSourceElemTy)
             let mutVar, mutToImmutSelector = ConvertImmutableConsumerToMutableConsumer sourceConv (immutVar, Expr.Var immutVar)
             // Determine if we need to use IQueryable-preserving Select
             let mustReturnIQueryable =
