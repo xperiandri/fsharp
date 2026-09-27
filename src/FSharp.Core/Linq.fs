@@ -400,6 +400,8 @@ module LeafExpressionConverter =
     let (|MemberInitializationHelperQ|_|) = (|SpecificCallToMethod|_|) (methodhandleof MemberInitializationHelper)
     let (|NewAnonymousObjectHelperQ|_|) = (|SpecificCallToMethod|_|) (methodhandleof NewAnonymousObjectHelper)
     let (|ArrayLookupQ|_|) = (|SpecificCallToMethod|_|) (methodhandleof (fun (x, y) -> LanguagePrimitives.IntrinsicFunctions.GetArray x y))
+    // QuotationToLambdaExpression is defined after the converter, so it cannot be named with methodhandleof here.
+    let (|QuotationToLambdaExpressionQ|_|) = SpecificCallToMethodInfo (typeof<ConvEnv>.DeclaringType.GetMethod "QuotationToLambdaExpression")
 
     //let (|ArrayAssignQ|_|) = (|SpecificCallToMethod|_|) (methodhandleof (fun -> LanguagePrimitives.IntrinsicFunctions.SetArray : int array -> int -> int -> unit))
     //let (|ArrayTypeQ|_|) (ty:System.Type) = if ty.IsArray && ty.GetArrayRank() = 1 then Some (ty.GetElementType()) else None
@@ -482,6 +484,25 @@ module LeafExpressionConverter =
             | 0 -> isVariableOrElement e
             | 1 -> true
             | _ -> not createsObject)
+
+    type ParameterFinder() =
+        inherit ExpressionVisitor()
+        member val Found = false with get, set
+
+        override this.VisitParameter(node: ParameterExpression) : Expression =
+            this.Found <- true
+            node
+
+    /// Whether the lambda reads a parameter of the tree being built, directly or through a substituted 'let'
+    let usesEnclosingParameter (env: ConvEnv) (lambda: Expr) =
+        lambda.GetFreeVars()
+        |> Seq.exists (fun v ->
+            match env.varEnv.TryFind v with
+            | Some bound ->
+                let finder = ParameterFinder()
+                finder.Visit bound |> ignore
+                finder.Found
+            | None -> false)
 
     /// Convert F# quotations to LINQ expression trees.
     /// A more polished LINQ-Quotation translator will be published
@@ -696,6 +717,14 @@ module LeafExpressionConverter =
             // Throw away markers inserted to satisfy C#'s design where they pass an argument
             // or type T to an argument expecting Expression<T>.
             | ImplicitExpressionConversionHelperQ (_, GenericArgs [|_|], [x1]) -> ConvExprToLinqInContext { env with inExpressionLambda = true } x1
+
+            // The compiler turns a lambda passed where Expression<T> is expected into a call that converts
+            // its quotation when the tree runs, with the values of the variables it captures. A provider does
+            // not run the tree, so a nested lambda that reads a parameter of the tree never gets a value:
+            // that one is quoted, as C# does. Any other keeps the call, which a provider can evaluate.
+            | QuotationToLambdaExpressionQ (None, _, [ QuoteTyped (NewDelegate _ as lambda) ])
+                  when env.inExpressionLambda && usesEnclosingParameter env lambda ->
+                Expression.Quote(ConvExprToLinqInContext env lambda) |> asExpr
 
             // Use witnesses if they are available
             | CallWithWitnesses (objArgOpt, _, minfo2, witnessArgs, args) ->

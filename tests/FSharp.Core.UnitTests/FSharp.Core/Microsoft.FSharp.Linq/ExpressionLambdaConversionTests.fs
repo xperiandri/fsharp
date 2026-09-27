@@ -7,6 +7,9 @@ open System.Linq.Expressions
 open Xunit
 open Microsoft.FSharp.Linq.RuntimeHelpers
 
+type LinqExpr =
+    static member FromFunc<'T, 'U>(e: Expression<Func<'T, 'U>>) = e
+
 type private Counter() =
     let mutable calls = 0
     member _.Calls = calls
@@ -53,6 +56,55 @@ let ``Assigned mutable variable stays a block in an expression lambda`` () =
 
     Assert.Equal(ExpressionType.Block, (bodyOf lambda).NodeType)
     Assert.Equal(6, lambda.Compile().Invoke 5)
+
+[<Fact>]
+let ``Lambda nested in an expression lambda is quoted`` () =
+    let lambda =
+        LeafExpressionConverter.QuotationToLambdaExpression <@ Func<int, Expression<Func<int, int>>>(fun x -> LinqExpr.FromFunc(fun y -> y + x)) @>
+
+    match bodyOf lambda with
+    | :? MethodCallExpression as call ->
+        Assert.Equal(nameof LinqExpr.FromFunc, call.Method.Name)
+        Assert.Equal(ExpressionType.Quote, call.Arguments.[0].NodeType)
+        Assert.Equal(ExpressionType.Lambda, (call.Arguments.[0] :?> UnaryExpression).Operand.NodeType)
+    | body -> Assert.Fail $"Expected a call of FromFunc, got {body}"
+
+    Assert.Equal(3, lambda.Compile().Invoke(1).Compile().Invoke 2)
+
+[<Fact>]
+let ``Nested lambda that reads no parameter of the tree stays a call`` () =
+    let lambda =
+        LeafExpressionConverter.QuotationToLambdaExpression <@ Func<int, Expression<Func<int, int>>>(fun _ -> LinqExpr.FromFunc(fun y -> y + 1)) @>
+
+    match bodyOf lambda with
+    | :? MethodCallExpression as call -> Assert.Equal(ExpressionType.Call, call.Arguments.[0].NodeType)
+    | body -> Assert.Fail $"Expected a call of FromFunc, got {body}"
+
+    Assert.Equal(3, lambda.Compile().Invoke(0).Compile().Invoke 2)
+
+[<Fact>]
+let ``Let read only by a nested lambda is evaluated once for each outer element`` () =
+    let counter = Counter()
+
+    let lambda =
+        LeafExpressionConverter.QuotationToLambdaExpression
+            <@ Func<int, Expression<Func<int, int>>>(fun _ -> let n = counter.Next() in LinqExpr.FromFunc(fun y -> y + n)) @>
+
+    let add = lambda.Compile().Invoke(0).Compile()
+    Assert.Equal(3, add.Invoke 2)
+    Assert.Equal(4, add.Invoke 3)
+    Assert.Equal(1, counter.Calls)
+
+[<Fact>]
+let ``Nested lambda in an evaluated quotation gets the values it captures`` () =
+    let inner =
+        LeafExpressionConverter.EvaluateQuotation <@ let x = 5 in LinqExpr.FromFunc(fun y -> y + x) @> :?> Expression<Func<int, int>>
+
+    match inner.Body with
+    | :? BinaryExpression as sum -> Assert.Equal(ExpressionType.Constant, sum.Right.NodeType)
+    | body -> Assert.Fail $"Expected a sum, got {body}"
+
+    Assert.Equal(7, inner.Compile().Invoke 2)
 
 [<Fact>]
 let ``EvaluateQuotation still evaluates a let once`` () =

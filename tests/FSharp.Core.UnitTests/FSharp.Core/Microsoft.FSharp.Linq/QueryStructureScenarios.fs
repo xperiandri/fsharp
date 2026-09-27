@@ -2,11 +2,12 @@
 
 module FSharp.Core.UnitTests.Linq.QueryStructureScenarios
 
+open System
 open System.Linq
+open System.Linq.Expressions
 
-let private quotedLambda =
-    [ Violation.RuntimeHelperCall "LeafExpressionConverter.QuotationToLambdaExpression"
-      Violation.RuntimeHelperCall "LeafExpressionConverter.SubstHelper" ]
+type Compiled =
+    static member Run(lambda: Expression<Func<int, int>>, argument: int) = lambda.Compile().Invoke argument
 
 let private nested operators =
     operators |> List.map Violation.NestedInCollectionSelector
@@ -185,13 +186,41 @@ let private subqueries () =
           "second for over a source filtered by a lambda"
           (fun db -> query { for c in db.Customers do for o in db.Orders.Where(fun o -> o.CustomerId = c.Id) do select (c.Name, o.Id) })
           customersWithOrders
-      |> Scenario.violating quotedLambda
 
       Scenario.rows
           "where with a lambda over another source"
           (fun db -> query { for c in db.Customers do where (db.Orders.Any(fun o -> o.CustomerId = c.Id)); select c.Name })
           (fun data -> seq { for c in data.Customers do if c.Orders.Count > 0 then yield c.Name })
-      |> Scenario.violating quotedLambda ]
+
+      Scenario.rows
+          "where with All over another source"
+          (fun db -> query { for c in db.Customers do where (db.Orders.Where(fun o -> o.CustomerId = c.Id).All(fun o -> o.Total > 1.0)); select c.Name })
+          (fun data -> seq { for c in data.Customers do if c.Orders |> Seq.forall (fun o -> o.Total > 1.0) then yield c.Name })
+
+      Scenario.rows
+          "select with Count over another source"
+          (fun db -> query { for c in db.Customers do select (c.Name, db.Orders.Count(fun o -> o.CustomerId = c.Id)) })
+          (fun data -> seq { for c in data.Customers -> c.Name, c.Orders.Count })
+
+      Scenario.rows
+          "lambda over another source capturing a let"
+          (fun db -> query { for c in db.Customers do where (let id = c.Id in db.Orders.Any(fun o -> o.CustomerId = id)); select c.Name })
+          (fun data -> seq { for c in data.Customers do if c.Orders.Count > 0 then yield c.Name })
+
+      Scenario.rows
+          "lambda nested two levels deep"
+          (fun db ->
+              query {
+                  for c in db.Customers do
+                  where (db.Orders.Any(fun o -> o.CustomerId = c.Id && db.Lines.Any(fun l -> l.OrderId = o.Id && l.Quantity > 1)))
+                  select c.Name
+              })
+          (fun data -> seq { for c in data.Customers do if c.Orders |> Seq.exists (fun o -> o.Lines |> Seq.exists (fun l -> l.Quantity > 1)) then yield c.Name })
+
+      Scenario.rows
+          "where with a method whose lambda reads nothing of the query"
+          (fun db -> query { for c in db.Customers do where (c.Age > Compiled.Run((fun x -> x + 1), 26)); select c.Name })
+          (fun data -> seq { for c in data.Customers do if c.Age > 27 then yield c.Name }) ]
 
 let private leftJoins () =
     [ Scenario.rows
