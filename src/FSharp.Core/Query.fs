@@ -443,7 +443,7 @@ module Query =
 
     /// Project F# function expressions to Linq LambdaExpression nodes
     let FuncExprToLinqFunc2Expression (srcTy, targetTy, v, body) =
-        FuncExprToDelegateExpr(srcTy, targetTy, v, body) |> QuotationToExpression
+        FuncExprToDelegateExpr(srcTy, targetTy, v, body) |> MakeImplicitExpressionConversion |> QuotationToExpression
 
     let FuncExprToLinqFunc2 (srcTy, targetTy, v, body) =
         FuncExprToDelegateExpr(srcTy, targetTy, v, body) |> EvaluateQuotation
@@ -986,6 +986,19 @@ module Query =
 
         | _ -> None
 
+    [<return: Struct>]
+    let rec (|NewRecordAfterLets|_|) (p: Expr) =
+        match p with
+        | Let(_, _, NewRecordAfterLets args) -> ValueSome args
+        | NewRecord(_, args) -> ValueSome args
+        | _ -> ValueNone
+
+    let rec countOccurrences (v: Var) (p: Expr) =
+        match p with
+        | ExprShape.ShapeVar v2 -> if v = v2 then 1 else 0
+        | ExprShape.ShapeLambda(_, body) -> countOccurrences v body
+        | ExprShape.ShapeCombination(_, args) -> List.sumBy (countOccurrences v) args
+
     let (|MacroReduction|_|) (p: Expr) =
 
         match p with
@@ -1029,6 +1042,14 @@ module Query =
                                 | TupleGet(Var tv, _) when tv.Name = "tupledArg" -> true
                                 | _ when v.Name = "copyOfStruct" && v.Type.IsValueType -> true
                                 | _ -> false) ->
+            let body = body.Substitute (fun v2 -> if v = v2 then Some e else None)
+            Some body
+
+        // Macro - eliminate the lets that evaluate record fields in the order they are written,
+        // so that the record reaches ProduceMoreMutables as a record construction:
+        //    - let v = e in ... NewRecord(..., v, ...)
+        | Let(v, e, (NewRecordAfterLets args as body))
+            when args |> List.exists (function Var arg -> arg = v | _ -> false) && countOccurrences v body = 1 ->
             let body = body.Substitute (fun v2 -> if v = v2 then Some e else None)
             Some body
 

@@ -38,6 +38,26 @@ a.Equals(b)  // Was: false, Now: true
 // New: if (node.NodeType == ExpressionType.Block)
 ```
 
+Inside a lambda handed to a LINQ provider (a query operator over `IQueryable`, or an F# lambda passed as `Expression<Func<..>>`) there is no `Block`: an immutable let is substituted where it is used, as a C# expression lambda would have to be written. This covers the lets the compiler introduces for record and anonymous record fields written out of order, tupled lambda parameters and struct copies.
+
+```fsharp
+db.People.Select(fun p -> {| Name = p.Name; Age = p.Age |})
+// Was: p => { var Name = p.Name; new <>f__AnonymousType(p.Age, Name) }
+// Now: p => new <>f__AnonymousType(p.Age, p.Name)
+```
+
+The value expression is repeated when the variable is used more than once, so side effects in it are no longer evaluated exactly once when such a lambda is compiled. A mutable variable that is assigned still produces a `Block`.
+
+### Nested lambdas are quoted
+
+A lambda passed as `Expression<Func<..>>` inside another converted lambda is now a `Quote` of the converted lambda, as in C#, instead of a call that converts its quotation when the outer tree runs.
+
+```fsharp
+db.Customers.Where(fun c -> db.Orders.Any(fun o -> o.CustomerId = c.Id))
+// Was: c => Orders.Any(QuotationToLambdaExpression(SubstHelper(<quotation>, [c], [c])))
+// Now: c => Orders.Any(o => o.CustomerId == c.Id)
+```
+
 ### Array access uses ArrayIndex
 
 ```fsharp
