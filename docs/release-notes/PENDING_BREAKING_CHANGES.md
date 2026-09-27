@@ -55,6 +55,18 @@ db.People.Select(fun p -> {| Name = p.Name; Age = p.Age |})
 
 Every other let keeps its `Block` and is evaluated once, where it is written: a value that is computed by a call and read more than once, by a nested lambda or after something else has run, a struct of your own or a boxed value, a `mutable` variable, and every let of a lambda that assigns, sets a property or field, or runs a statement. `EvaluateQuotation` and `QuotationToExpression` are not affected.
 
+### Nested lambdas that read a parameter of the outer lambda are quoted
+
+Inside a lambda handed to a LINQ provider, a lambda passed as `Expression<Func<..>>` that reads a parameter of the outer lambda is now a `Quote` of the converted lambda, as in C#, instead of a call that converts its quotation when the outer tree runs.
+
+```fsharp
+db.Customers.Where(fun c -> db.Orders.Any(fun o -> o.CustomerId = c.Id))
+// Was: c => Orders.Any(QuotationToLambdaExpression(SubstHelper(<quotation>, [c], [c])))
+// Now: c => Orders.Any(o => o.CustomerId == c.Id)
+```
+
+**Impact:** When such a tree is compiled and run, the nested lambda reads the outer parameter through a closure where it used to get its value as a constant. A let of the outer lambda that names a member of its parameter is read by the nested lambda when that lambda runs. A nested lambda that reads no parameter of the outer lambda is converted as before, and so is one that cannot be converted.
+
 ### Array access uses ArrayIndex
 
 ```fsharp
