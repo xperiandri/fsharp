@@ -1220,6 +1220,20 @@ module Query =
         let mutConsumingExpr = SimplifyConsumingExpr mutConsumingExprBeforeSimplification
         mutConsumingVar, mutConsumingExpr
 
+    /// Whether 'expr' is 'original' itself, or the elements of the tuple 'original' put back together in order.
+    let rec IsSameValue (original: Expr) (expr: Expr) =
+        match expr with
+        | NewTuple elements when Type.op_Equality(expr.Type, original.Type) ->
+            elements |> List.indexed |> List.forall (fun (i, element) -> IsSameValue (Expr.TupleGet(original, i)) element)
+        | _ -> expr = original
+
+    /// A 'yield' or 'select' of the element itself hands converted elements on as the provider produced them,
+    /// rather than rebuilding each of them, and each grouping, in the middle of the query.
+    let YieldsConvertedElementItself sourceConv (immutVar: Var, immutBody: Expr) =
+        match sourceConv with
+        | NoConv -> false
+        | _ -> IsSameValue (Expr.Var immutVar) (MacroExpand immutBody)
+
     let (|AnyNestedQuery|_|) e =
         match e with
         | CallQueryBuilderRunValue (None, _, [_; QuoteTyped e ])
@@ -1301,6 +1315,9 @@ module Query =
             let rec TransFor mutSource immutSelector =
                 match immutSelector with
 
+                | CallQueryBuilderYield(_, _, immutSelectorBody) when YieldsConvertedElementItself sourceConv (immutSelectorVar, immutSelectorBody) ->
+                    mutSource, sourceConv
+
                 // query.For (source, (fun selectorVar -> yield res)) @>
                 //    ~~> TRANS(source.Select(selectorVar -> res)
                 | CallQueryBuilderYield(_, _, immutSelectorBody) ->
@@ -1366,11 +1383,14 @@ module Query =
 
         | CallSelect (_, [_; qTy; _], mutSource, Lambda(immutSelectorVar, immutSelectorBody)) ->
 
-            let mutSource, _sourceConv, mutSelectorVar, mutSelectorBody = TransInnerApplicative check mutSource (immutSelectorVar, immutSelectorBody)
-            let mutSelectorBody, selectorConv = ProduceMoreMutables TransInnerNoCheck mutSelectorBody
-            let mutSelectorBody = CleanupLeaf mutSelectorBody
+            let mutSource, sourceConv, mutSelectorVar, mutSelectorBody = TransInnerApplicative check mutSource (immutSelectorVar, immutSelectorBody)
+            if YieldsConvertedElementItself sourceConv (immutSelectorVar, immutSelectorBody) then
+                mutSource, sourceConv
+            else
+                let mutSelectorBody, selectorConv = ProduceMoreMutables TransInnerNoCheck mutSelectorBody
+                let mutSelectorBody = CleanupLeaf mutSelectorBody
 
-            TransInnerResult.MakeSelect(canElim, qTyIsIQueryable qTy, mutSource, mutSelectorVar, mutSelectorBody), selectorConv
+                TransInnerResult.MakeSelect(canElim, qTyIsIQueryable qTy, mutSource, mutSelectorVar, mutSelectorBody), selectorConv
 
         | CallQueryBuilderYieldFrom (_, _, [source]) -> TransInner canElim check source
 
