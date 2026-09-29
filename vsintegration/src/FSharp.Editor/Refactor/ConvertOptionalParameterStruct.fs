@@ -395,7 +395,7 @@ type internal FSharpConvertOptionalParameterStructRefactoring [<ImportingConstru
                                         let! cancellationToken = CancellableTask.getCancellationToken ()
 
                                         let! memberUses =
-                                            SymbolHelpers.getSymbolUses memberUse document checkResults SymbolHelpers.codeSymbolUseKinds
+                                            SymbolHelpers.getSymbolUses memberUse document checkResults RelatedSymbolUseKind.AllInCode
 
                                         let usesByDocument =
                                             memberUses

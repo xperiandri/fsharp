@@ -16,6 +16,7 @@ open Microsoft.CodeAnalysis.ExternalAccess.FSharp.Editor.FindUsages
 open Microsoft.CodeAnalysis.FindSymbols
 open Microsoft.CodeAnalysis.Text
 
+open FSharp.Compiler.CodeAnalysis
 open FSharp.Compiler.EditorServices
 open FSharp.Compiler.Text
 open CancellableTasks
@@ -296,7 +297,7 @@ module FSharpFindUsagesService =
                         findCrossLanguageReferences docId declarations.DefinitionItems cancellationToken
                     | _ -> Task.FromResult Seq.empty
 
-                do! SymbolHelpers.findSymbolUses caret.SymbolUse document caret.CheckFileResults SymbolHelpers.codeSymbolUseKinds onFound
+                do! SymbolHelpers.findSymbolUses caret.SymbolUse document caret.CheckFileResults RelatedSymbolUseKind.AllInCode onFound
                 let! found = crossLanguageSearch
                 do! reportCrossLanguageReferences found context.OnReferenceFoundAsync
         }
