@@ -139,6 +139,7 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Compile Include="InlineRenameServiceTests.fs" />
+    <Compile Include="ProjectOptionsReactorTests.fs" />
   </ItemGroup>
 
   <ItemGroup>
