@@ -10,6 +10,7 @@ open System.IO
 open System.Linq
 open System.Runtime.CompilerServices
 open System.Threading
+open System.Threading.Tasks
 open System.Windows
 open FSharp.Compiler
 open FSharp.Compiler.CodeAnalysis
@@ -66,40 +67,58 @@ module private FSharpProjectOptionsHelpers =
     let inline hasProjectVersionChanged (oldProject: Project) (newProject: Project) =
         oldProject.Version <> newProject.Version
 
-    let hasDependentVersionChanged (oldProject: Project) (newProject: Project) (ct: CancellationToken) =
-        let oldProjectMetadataRefs = oldProject.MetadataReferences
-        let newProjectMetadataRefs = newProject.MetadataReferences
+    let hasDependentVersionChanged (oldProject: Project) (newProject: Project) =
+        cancellableTask {
+            let! ct = CancellableTask.getCancellationToken ()
+            let oldProjectMetadataRefs = oldProject.MetadataReferences
+            let newProjectMetadataRefs = newProject.MetadataReferences
 
-        if oldProjectMetadataRefs.Count <> newProjectMetadataRefs.Count then
-            true
-        else
+            if oldProjectMetadataRefs.Count <> newProjectMetadataRefs.Count then
+                return true
+            else
 
-            let oldProjectRefs = oldProject.ProjectReferences
-            let newProjectRefs = newProject.ProjectReferences
+                let oldProjectRefs = oldProject.ProjectReferences
+                let newProjectRefs = newProject.ProjectReferences
 
-            oldProjectRefs.Count() <> newProjectRefs.Count()
-            || (oldProjectRefs, newProjectRefs)
-               ||> Seq.exists2 (fun p1 p2 ->
-                   ct.ThrowIfCancellationRequested()
-                   let doesProjectIdDiffer = p1.ProjectId <> p2.ProjectId
-                   let p1 = oldProject.Solution.GetProject(p1.ProjectId)
-                   let p2 = newProject.Solution.GetProject(p2.ProjectId)
+                if oldProjectRefs.Count() <> newProjectRefs.Count() then
+                    return true
+                else
+                    let mutable result = false
+                    let mutable enum1 = oldProjectRefs.GetEnumerator()
+                    let mutable enum2 = newProjectRefs.GetEnumerator()
 
-                   doesProjectIdDiffer
-                   || (if p1.IsFSharp then
-                           p1.Version <> p2.Version
-                       else
-                           let v1 = p1.GetDependentVersionAsync(ct).Result
-                           let v2 = p2.GetDependentVersionAsync(ct).Result
-                           v1 <> v2))
+                    while not result && enum1.MoveNext() && enum2.MoveNext() do
+                        ct.ThrowIfCancellationRequested()
+                        let p1 = enum1.Current
+                        let p2 = enum2.Current
+                        let doesProjectIdDiffer = p1.ProjectId <> p2.ProjectId
+                        let p1 = oldProject.Solution.GetProject(p1.ProjectId)
+                        let p2 = newProject.Solution.GetProject(p2.ProjectId)
 
-    let isProjectInvalidated (oldProject: Project) (newProject: Project) ct =
-        let hasProjectVersionChanged = hasProjectVersionChanged oldProject newProject
+                        if doesProjectIdDiffer then
+                            result <- true
+                        elif p1.IsFSharp then
+                            result <- p1.Version <> p2.Version
+                        else
+                            let! v1 = p1.GetDependentVersionAsync(ct)
+                            and! v2 = p2.GetDependentVersionAsync(ct)
+                            result <- v1 <> v2
 
-        if newProject.AreFSharpInMemoryCrossProjectReferencesEnabled then
-            hasProjectVersionChanged || hasDependentVersionChanged oldProject newProject ct
-        else
-            hasProjectVersionChanged
+                    return result
+        }
+
+    let isProjectInvalidated (oldProject: Project) (newProject: Project) =
+        cancellableTask {
+            let hasProjectVersionChanged = hasProjectVersionChanged oldProject newProject
+
+            if newProject.AreFSharpInMemoryCrossProjectReferencesEnabled then
+                if hasProjectVersionChanged then
+                    return true
+                else
+                    return! hasDependentVersionChanged oldProject newProject
+            else
+                return hasProjectVersionChanged
+        }
 
 type private SingleFileCacheEntry =
     {
@@ -170,6 +189,15 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
     let lastSuccessfulCompilations = ConcurrentDictionary<ProjectId, Compilation>()
 
     let scriptUpdatedEvent = Event<FSharpProjectOptions>()
+
+    let disposeSingleFileCacheEntry ({ Subscription = subscription }: SingleFileCacheEntry) =
+        subscription |> ValueOption.iter _.Dispose()
+
+    let clearSingleFileCache () =
+        for entry in singleFileCache do
+            match singleFileCache.TryRemove(entry.Key) with
+            | true, cacheEntry -> disposeSingleFileCacheEntry cacheEntry
+            | _ -> ()
 
     // The '-r:' set of each project is watched for the reference stamps the snapshot-reuse
     // guard reads; invalidating the FCS build on a change is Roslyn's job (it swaps the
@@ -341,18 +369,50 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
 
                 let parsingOptions, _ = checker.GetParsingOptionsFromProjectOptions(projectOptions)
 
-                let updateProjectOptions () =
-                    async {
-                        let! scriptProjectOptions, _ = getProjectOptionsFromScript (sourceText.Container.CurrentText.ToFSharpSourceText())
+                let mutable debounceCts: CancellationTokenSource | null = null
 
-                        checker.NotifyFileChanged(document.FilePath, scriptProjectOptions)
-                        |> Async.Start
+                let disposeDebounceCts () =
+                    match Interlocked.Exchange(&debounceCts, null) with
+                    | null -> ()
+                    | cts ->
+                        cts.Cancel()
+                        cts.Dispose()
+
+                let updateProjectOptions () =
+                    let cts = new CancellationTokenSource()
+                    let debounceToken = cts.Token
+
+                    match Interlocked.Exchange(&debounceCts, cts) with
+                    | null -> ()
+                    | previousCts ->
+                        previousCts.Cancel()
+                        previousCts.Dispose()
+
+                    backgroundTask {
+                        try
+                            do! Task.Delay(500, debounceToken)
+
+                            let! scriptProjectOptions, _ =
+                                getProjectOptionsFromScript (sourceText.Container.CurrentText.ToFSharpSourceText())
+
+                            do! checker.NotifyFileChanged(document.FilePath, scriptProjectOptions)
+                        with
+                        | :? OperationCanceledException
+                        | :? TaskCanceledException -> ()
                     }
-                    |> Async.Start
+                    |> ignore
 
                 let addToCacheAndSubscribe (entry: SingleFileCacheEntry) =
-                    let subscription =
+                    let caretSubscription =
                         focusedCaret |> ValueOption.map _.LineChanged.Subscribe(updateProjectOptions)
+
+                    let subscription =
+                        ValueSome
+                            { new IDisposable with
+                                member _.Dispose() =
+                                    caretSubscription |> ValueOption.iter _.Dispose()
+                                    disposeDebounceCts ()
+                            }
 
                     { entry with
                         Subscription = subscription
@@ -380,13 +440,17 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
                   FileStamp = oldFileStamp
                   ParsingOptions = parsingOptions
                   ProjectOptions = projectOptions
+                  Subscription = _
               } ->
-                if fileStamp <> oldFileStamp || isProjectInvalidated document.Project oldProject ct then
+                let! isInvalidated =
+                    if fileStamp <> oldFileStamp then
+                        CancellableTask.singleton true
+                    else
+                        isProjectInvalidated document.Project oldProject
+
+                if isInvalidated then
                     match singleFileCache.TryRemove(document.Id) with
-                    | true,
-                      {
-                          Subscription = ValueSome subscription
-                      } -> subscription.Dispose()
+                    | true, cacheEntry -> disposeSingleFileCacheEntry cacheEntry
                     | _ -> ()
 
                     return! tryComputeOptionsBySingleScriptOrFile document userOpName
@@ -529,9 +593,11 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
                             return ValueSome struct (parsingOptions, projectOptions)
 
             | true, struct (oldProject, parsingOptions, projectOptions) ->
-                if isProjectInvalidated oldProject project ct then
+                let! isInvalidated = isProjectInvalidated oldProject project
+
+                if isInvalidated then
                     cache.TryRemove(projectId) |> ignore
-                    return! tryComputeOptions project ct
+                    return! tryComputeOptions project
                 else
                     return ValueSome struct (parsingOptions, projectOptions)
         }
@@ -614,13 +680,9 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
                     clearReferenceWatches projectId
                 | FSharpProjectOptionsMessage.ClearSingleFileOptionsCache(documentId) ->
                     match singleFileCache.TryRemove(documentId) with
-                    | true,
-                      {
-                          ProjectOptions = projectOptions
-                          Subscription = subscription
-                      } ->
+                    | true, ({ ProjectOptions = projectOptions } as cacheEntry) ->
                         checker.ClearCache([ projectOptions ])
-                        subscription |> ValueOption.iter (fun handler -> handler.Dispose())
+                        disposeSingleFileCacheEntry cacheEntry
                     | _ -> ()
         }
 
@@ -654,13 +716,7 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
         commandLineOptions.Clear()
         legacyProjectSites.Clear()
         cache.Clear()
-        // Dispose only the entries we actually removed: the subscription is not idempotent
-        // and the agent loop disposes what it removes on its own.
-        for entry in singleFileCache do
-            match singleFileCache.TryRemove(entry.Key) with
-            | true, { Subscription = subscription } -> subscription |> ValueOption.iter (fun handler -> handler.Dispose())
-            | _ -> ()
-
+        clearSingleFileCache ()
         lastSuccessfulCompilations.Clear()
         peReferences.Clear()
 
@@ -672,7 +728,8 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
     member _.ReferenceStamps = referenceChangeTracker :> IReferenceStamps
 
     interface IDisposable with
-        member _.Dispose() =
+        member this.Dispose() =
+            this.ClearAllCaches()
             referenceChangeTracker.Dispose()
             cancellationTokenSource.Cancel()
             cancellationTokenSource.Dispose()
