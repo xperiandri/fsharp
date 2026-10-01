@@ -34,9 +34,10 @@ let private tryEnclosingParen (sourceText: SourceText) (span: TextSpan) =
 
 /// `struct ` to insert in front of the `(` at the position, after a space when it would run into a name: `f(a, b)`.
 let private structAt (sourceText: SourceText) (position: int) =
-    match if position > 0 then sourceText[position - 1] else ' ' with
-    | c when Char.IsLetterOrDigit c || c = '_' || c = '\'' || c = '`' || c = ')' || c = ']' -> " struct "
-    | _ -> "struct "
+    if needsSpaceBefore sourceText position then
+        " struct "
+    else
+        "struct "
 
 /// Whether the text between start and finish is a whole generic argument: `<` or `,` before it, `>` or `,` after.
 let private isGenericArgument (sourceText: SourceText) (start: int) (finish: int) =
@@ -71,21 +72,30 @@ let private typeChanges (sourceText: SourceText) (toStruct: bool) (isWholeAnnota
                 ]
         else
             let keyword = structKeyword sourceText m
+            let openParen = skipTrivia sourceText keyword.End
 
-            if isWholeAnnotation || isGenericArgument sourceText keyword.Start span.End then
+            if
+                (isWholeAnnotation || isGenericArgument sourceText keyword.Start span.End)
+                && openParen < span.End
+                && sourceText[openParen] = '('
+            then
                 [
-                    TextChange(TextSpan(keyword.Start, keyword.Length + 1), "")
+                    TextChange(keyword, "")
+                    TextChange(TextSpan(openParen, 1), "")
                     TextChange(TextSpan(span.End - 1, 1), "")
                 ]
             else
                 [ TextChange(keyword, "") ]
     | _ -> []
 
-/// Whether the tuple is the argument list of a method, constructor or union case call rather than a tuple value.
-let private isArgumentList (tuple: SynExpr) (path: SyntaxVisitorPath) =
+/// Whether the tuple is the argument list of a method, constructor or union case call rather than a tuple value,
+/// however the call is spaced: `M(a, b)` and `M (a, b)` alike.
+let private isArgumentList (callsMethod: SynExpr -> bool) (tuple: SynExpr) (path: SyntaxVisitorPath) =
     match path with
-    | SyntaxNode.SynExpr(SynExpr.Paren(expr = inner) as paren) :: SyntaxNode.SynExpr(SynExpr.App(flag = ExprAtomicFlag.Atomic; argExpr = arg) | SynExpr.New(
-        expr = arg)) :: _ -> isSame inner tuple && isSame arg paren
+    | SyntaxNode.SynExpr(SynExpr.Paren(expr = inner) as paren) :: SyntaxNode.SynExpr(SynExpr.New(expr = arg)) :: _ ->
+        isSame inner tuple && isSame arg paren
+    | SyntaxNode.SynExpr(SynExpr.Paren(expr = inner) as paren) :: SyntaxNode.SynExpr(SynExpr.App(
+        isInfix = false; funcExpr = funcExpr; argExpr = arg)) :: _ when isSame inner tuple && isSame arg paren -> callsMethod funcExpr
     | _ -> false
 
 /// Changes giving a tuple expression the target kind; ValueNone when it is not a tuple or cannot change in place.
@@ -146,9 +156,9 @@ let private isParameterList (tuple: SynPat) (path: SyntaxVisitorPath) =
 let kind: StructKind =
     {
         IsExpr =
-            fun expr path ->
+            fun callsMethod expr path ->
                 match expr with
-                | SynExpr.Tuple _ -> not (isArgumentList expr path)
+                | SynExpr.Tuple _ -> not (isArgumentList callsMethod expr path)
                 | _ -> false
         IsPat =
             fun pat path ->

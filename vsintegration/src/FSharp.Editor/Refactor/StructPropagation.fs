@@ -46,6 +46,22 @@ let private symbolUseAt (source: Source) (ident: Ident) =
     let line = source.Text.Lines[Line.toZ ident.idRange.EndLine].ToString()
     source.Check.GetSymbolUseAtLocation(ident.idRange.EndLine, ident.idRange.EndColumn, line, [ ident.idText ])
 
+/// Whether the type is or contains a generic type parameter, which other calls may instantiate with another form.
+let rec private involvesTypeParameter (ty: FSharpType) =
+    ty.IsGenericParameter || ty.GenericArguments |> Seq.exists involvesTypeParameter
+
+/// Whether the declared type of the parameter at the position involves a generic type parameter.
+let private isGenericParameter (mfv: FSharpMemberOrFunctionOrValue) (group: int) (index: int voption) =
+    if group >= mfv.CurriedParameterGroups.Count then
+        false
+    else
+        let parameters = mfv.CurriedParameterGroups[group]
+
+        match index with
+        | ValueSome index when index < parameters.Count -> involvesTypeParameter parameters[index].Type
+        | ValueSome _ -> false
+        | ValueNone -> parameters |> Seq.exists (fun parameter -> involvesTypeParameter parameter.Type)
+
 let rec private tryPatternIdent (pat: SynPat) =
     match pat with
     | SynPat.Named(ident = SynIdent(ident, _))
@@ -294,8 +310,11 @@ type private Engine(solution: Solution, kind: StructKind, toStruct: bool, userOp
         | Some symbolUse when (tryDeclarationDocument symbolUse.Symbol).IsSome ->
             let isValue =
                 match symbolUse.Symbol with
-                | :? FSharpField -> true
-                | :? FSharpMemberOrFunctionOrValue as mfv -> not mfv.IsFunction && not mfv.IsMember
+                | :? FSharpField as field -> not (involvesTypeParameter field.FieldType)
+                | :? FSharpMemberOrFunctionOrValue as mfv ->
+                    not mfv.IsFunction
+                    && not mfv.IsMember
+                    && not (mfv.FullTypeSafe |> Option.exists involvesTypeParameter)
                 | _ -> false
 
             if isValue then
@@ -306,7 +325,10 @@ type private Engine(solution: Solution, kind: StructKind, toStruct: bool, userOp
         match symbolUseAt source name with
         | Some functionUse when (tryDeclarationDocument functionUse.Symbol).IsSome ->
             match functionUse.Symbol with
-            | :? FSharpMemberOrFunctionOrValue as mfv when mfv.IsFunction || mfv.IsMember ->
+            | :? FSharpMemberOrFunctionOrValue as mfv when
+                (mfv.IsFunction || mfv.IsMember)
+                && not (involvesTypeParameter mfv.ReturnParameter.Type)
+                ->
                 this.Enqueue (keyOf "R" functionUse.Symbol) (Slot.Result(functionUse, source))
             | _ -> ()
         | _ -> ()
@@ -315,7 +337,7 @@ type private Engine(solution: Solution, kind: StructKind, toStruct: bool, userOp
         match symbolUseAt source functionName with
         | Some functionUse when (tryDeclarationDocument functionUse.Symbol).IsSome ->
             match functionUse.Symbol with
-            | :? FSharpMemberOrFunctionOrValue as mfv when mfv.IsFunction || mfv.IsMember ->
+            | :? FSharpMemberOrFunctionOrValue as mfv when (mfv.IsFunction || mfv.IsMember) && not (isGenericParameter mfv group index) ->
                 let position =
                     match index with
                     | ValueSome index -> $"{group}|{index}"
@@ -362,7 +384,12 @@ type private Engine(solution: Solution, kind: StructKind, toStruct: bool, userOp
             ->
             this.Retarget source container rest
             this.FlowOut source container rest
-        | SyntaxNode.SynMatchClause(SynMatchClause(resultExpr = result)) :: SyntaxNode.SynExpr(SynExpr.Match _ as container) :: rest when
+        | SyntaxNode.SynExpr(SynExpr.TryFinally(tryExpr = body) as container) :: rest when isSame body node ->
+            this.FlowOut source container rest
+        | SyntaxNode.SynExpr(SynExpr.TryWith(tryExpr = body) as container) :: rest when isSame body node ->
+            this.Retarget source container rest
+            this.FlowOut source container rest
+        | SyntaxNode.SynMatchClause(SynMatchClause(resultExpr = result)) :: SyntaxNode.SynExpr(SynExpr.Match _ | SynExpr.TryWith _ as container) :: rest when
             isSame result node
             ->
             this.Retarget source container rest
@@ -388,15 +415,7 @@ type private Engine(solution: Solution, kind: StructKind, toStruct: bool, userOp
                 | _ -> ()
         | SyntaxNode.SynExpr(SynExpr.Match(expr = scrutinee; clauses = clauses) as matchExpr) :: rest when isSame scrutinee node ->
             for SynMatchClause(pat = pat) as clause in clauses do
-                let stripped = stripParenPats pat
-
-                let strippedPath =
-                    match pat with
-                    | SynPat.Paren _ -> [ SyntaxNode.SynPat pat ]
-                    | _ -> [ SyntaxNode.SynMatchClause clause; SyntaxNode.SynExpr matchExpr ] @ rest
-
-                if kind.IsPat stripped strippedPath then
-                    this.AddOrFail source (kind.PatChanges source.Text toStruct stripped strippedPath)
+                this.IntoPattern source pat (SyntaxNode.SynMatchClause clause :: SyntaxNode.SynExpr matchExpr :: rest)
         | _ -> ()
 
     /// The expression must now produce the changing form: change what it is built from.
@@ -408,7 +427,8 @@ type private Engine(solution: Solution, kind: StructKind, toStruct: bool, userOp
         | SynExpr.Typed(expr = inner; targetType = annotation) ->
             this.Add source (annotationChanges source.Text annotation)
             this.Retarget source inner childPath
-        | _ when kind.IsExpr expr path -> this.AddOrFail source (kind.ExprChanges source.Text toStruct expr path)
+        | _ when kind.IsExpr (callsMethod source.Text source.Check) expr path ->
+            this.AddOrFail source (kind.ExprChanges source.Text toStruct expr path)
         | SynExpr.Ident ident -> this.EnqueueSymbol source ident
         | SynExpr.LongIdent(longDotId = SynLongIdent(id = ids))
         | SynExpr.DotGet(longDotId = SynLongIdent(id = ids)) ->
@@ -425,6 +445,12 @@ type private Engine(solution: Solution, kind: StructKind, toStruct: bool, userOp
         | SynExpr.Match(clauses = clauses) ->
             for SynMatchClause(resultExpr = result) as clause in clauses do
                 this.Retarget source result (SyntaxNode.SynMatchClause clause :: childPath)
+        | SynExpr.TryFinally(tryExpr = body) -> this.Retarget source body childPath
+        | SynExpr.TryWith(tryExpr = body; withCases = handlers) ->
+            this.Retarget source body childPath
+
+            for SynMatchClause(resultExpr = result) as handler in handlers do
+                this.Retarget source result (SyntaxNode.SynMatchClause handler :: childPath)
         | SynExpr.Sequential(expr2 = last) -> this.Retarget source last childPath
         | SynExpr.LetOrUse letOrUse -> this.Retarget source letOrUse.Body childPath
         | _ -> ()
@@ -439,6 +465,11 @@ type private Engine(solution: Solution, kind: StructKind, toStruct: bool, userOp
             match node with
             | SyntaxNode.SynBinding(SynBinding(headPat = SynPat.Named(ident = SynIdent(ident, _)); expr = body)) when isDeclared ident ->
                 this.Retarget source body (node :: path)
+            | SyntaxNode.SynExpr(SynExpr.Match(expr = scrutinee; clauses = clauses)) when
+                clauses
+                |> List.exists (fun (SynMatchClause(pat = pat)) -> tryPatternIdent pat |> ValueOption.exists isDeclared)
+                ->
+                this.Retarget source scrutinee (node :: path)
             | SyntaxNode.SynPat(SynPat.Typed(pat = inner; targetType = annotation)) when
                 tryPatternIdent inner |> ValueOption.exists isDeclared
                 ->
@@ -660,7 +691,17 @@ let registerConversion
                 let linePosition = sourceText.Lines.GetLinePosition context.Span.Start
                 Position.mkPos (Line.fromZ linePosition.Line) linePosition.Character
 
-            match tryCaretNode kind caret parseResults.ParseTree with
+            // Telling an argument list from a value takes resolving the call; skip that when no node of the kind is near.
+            let! found =
+                match tryCaretNode kind (fun _ -> false) caret parseResults.ParseTree with
+                | ValueNone -> CancellableTask.singleton ValueNone
+                | ValueSome _ ->
+                    cancellableTask {
+                        let! _, checkResults = document.GetFSharpParseAndCheckResultsAsync userOpName
+                        return tryCaretNode kind (callsMethod sourceText checkResults) caret parseResults.ParseTree
+                    }
+
+            match found with
             | ValueSome caretNode when not (isInQuotation caretNode) ->
                 let isStruct = kind.IsStruct caretNode
 
