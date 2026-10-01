@@ -80,5 +80,6 @@ type internal IFSharpChecksummedPersistentStorageService =
 /// Where the data of a solution is kept, as Roslyn's `IPersistentStorageConfiguration` decides it.
 type internal IFSharpPersistentStorageConfiguration =
 
-    /// The directory, or ValueNone to keep nothing for the solution.
-    abstract TryGetStorageLocation: solution: Solution -> string voption
+    /// The directory, or ValueNone to keep nothing for the solution. Asynchronous, unlike Roslyn's, because Visual
+    /// Studio answers where a solution keeps its state only on the main thread.
+    abstract TryGetStorageLocationAsync: solution: Solution * cancellationToken: CancellationToken -> Task<string voption>
