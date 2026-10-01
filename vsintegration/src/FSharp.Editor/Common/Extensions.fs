@@ -219,14 +219,14 @@ type SourceText with
             let line = this.Lines[i]
             text.AsMemory(line.Start, line.End - line.Start))
 
-    /// The line ending the file itself uses at `position`, so that inserted text does not mix its
-    /// own convention into the document. Falls back to the host's for a file with a single line.
     member this.LineBreakAt(position: int) =
-        let line = this.Lines.GetLineFromPosition position
+        let rec lineBreakOf (line: TextLine) =
+            match this.ToString(TextSpan(line.End, line.EndIncludingLineBreak - line.End)) with
+            | "" when line.LineNumber > 0 -> lineBreakOf this.Lines[line.LineNumber - 1]
+            | "" -> Environment.NewLine
+            | lineBreak -> lineBreak
 
-        match this.ToString(TextSpan(line.End, line.EndIncludingLineBreak - line.End)) with
-        | "" -> Environment.NewLine
-        | lineBreak -> lineBreak
+        lineBreakOf (this.Lines.GetLineFromPosition position)
 
 type NavigationItem with
 
