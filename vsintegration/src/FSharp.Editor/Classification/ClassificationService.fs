@@ -53,42 +53,61 @@ type internal OpenDocumentClassification =
 type internal ClassifyWholeFile = CancellationToken -> Task<OpenDocumentClassification voption>
 
 /// One classification of a document version, shared by every request that arrives while it runs.
-/// The computation starts with the first waiter and is cancelled only when the last one leaves.
+/// The computation starts with the first waiter and is cancelled only when the last one leaves; once
+/// it is, nobody can join it any more.
 [<Sealed>]
 type internal InFlightClassification(version: ClassificationVersion, compute: ClassifyWholeFile) =
     let cts = new CancellationTokenSource()
     let job = lazy (compute cts.Token)
+    let gate = obj ()
     let mutable waiters = 0
+    let mutable closed = false
 
     member _.Version = version
 
-    member _.IsCancelled = cts.IsCancellationRequested
+    member _.IsCancelled = lock gate (fun () -> closed)
 
     member _.IsCompleted = job.IsValueCreated && job.Value.IsCompleted
 
-    member _.Join(cancellationToken: CancellationToken) : Task<OpenDocumentClassification voption> =
-        Interlocked.Increment &waiters |> ignore
-        let job = job.Value
-        let left = ref 0
+    /// ValueNone once the last waiter has left and the work is being cancelled: start a new one.
+    member _.TryJoin(cancellationToken: CancellationToken) : Task<OpenDocumentClassification voption> voption =
+        let joined =
+            lock gate (fun () ->
+                if not closed then
+                    waiters <- waiters + 1
 
-        let leave () =
-            if
-                Interlocked.Exchange(left, 1) = 0
-                && Interlocked.Decrement &waiters = 0
-                && not job.IsCompleted
-            then
-                cts.Cancel()
+                not closed)
 
-        task {
-            use _ = cancellationToken.Register(fun () -> leave ())
+        if not joined then
+            ValueNone
+        else
+            let job = job.Value
+            let left = ref 0
 
-            try
-                let! _ = Task.WhenAny(job, Task.Delay(Timeout.Infinite, cancellationToken))
-                cancellationToken.ThrowIfCancellationRequested()
-                return! job
-            finally
-                leave ()
-        }
+            let leave () =
+                if Interlocked.Exchange(left, 1) = 0 then
+                    let cancel =
+                        lock gate (fun () ->
+                            waiters <- waiters - 1
+                            closed <- waiters = 0 && not job.IsCompleted
+                            closed)
+
+                    // Outside the lock: cancellation callbacks run synchronously.
+                    if cancel then
+                        cts.Cancel()
+
+            ValueSome(
+                task {
+                    use _ = cancellationToken.Register(fun () -> leave ())
+
+                    try
+                        let! _ = Task.WhenAny(job, Task.Delay(Timeout.Infinite, cancellationToken))
+                        cancellationToken.ThrowIfCancellationRequested()
+                        return! job
+                    finally
+                        leave ()
+                }
+            )
 
 [<Export(typeof<IFSharpClassificationService>)>]
 type internal FSharpClassificationService [<ImportingConstructor>] () =
@@ -223,11 +242,18 @@ type internal FSharpClassificationService [<ImportingConstructor>] () =
             openDocumentClassifications.Remove documentId |> ignore
             openDocumentClassifications.Add(documentId, classification))
 
+    static let tryGetRemembered (documentId: DocumentId) =
+        // Under the writer's lock: between its Remove and Add the entry is briefly missing.
+        lock openDocumentClassifications (fun () ->
+            match openDocumentClassifications.TryGetValue documentId with
+            | true, classification -> ValueSome classification
+            | _ -> ValueNone)
+
     // Only for the text it was computed from: the lookup names positions, so against edited text it
     // would colour the wrong characters.
     static let addLastGood (documentId: DocumentId) (sourceText: SourceText) (targetSpan: TextSpan) (result: List<ClassifiedSpan>) =
-        match openDocumentClassifications.TryGetValue documentId with
-        | true, classification when classification.Text.ContentEquals sourceText ->
+        match tryGetRemembered documentId with
+        | ValueSome classification when classification.Text.ContentEquals sourceText ->
             addSemanticClassificationByLookup sourceText targetSpan classification.Lookup result
         | _ -> ()
 
@@ -244,9 +270,10 @@ type internal FSharpClassificationService [<ImportingConstructor>] () =
                 let classificationData =
                     checkResults.GetSemanticClassification(None, RelatedSymbolUseKind.All)
 
-                // Every checked file resolves at least its enclosing module, so nothing here means
-                // the classification itself failed (SemanticClassification.fs recovers with an empty
-                // array). Remembering that would pin the version to no colours.
+                // Every checked file resolves at least its enclosing module - an implicit one as a
+                // zero-width item - so nothing here means the classification itself failed (an
+                // aborted check, or SemanticClassification.fs recovering with an empty array).
+                // Remembering that would pin the version to no colours.
                 if classificationData.Length = 0 then
                     return ValueNone
                 else
@@ -261,6 +288,23 @@ type internal FSharpClassificationService [<ImportingConstructor>] () =
                     return ValueSome classification
         }
 
+    // An instance its last waiter has just abandoned refuses to be joined; the next pass replaces it.
+    static let rec joinClassification (documentId: DocumentId) (version: ClassificationVersion) start cancellationToken =
+        let inFlight =
+            inFlightClassifications.AddOrUpdate(
+                documentId,
+                (fun _ -> start ()),
+                fun _ (running: InFlightClassification) ->
+                    if running.Version = version && not running.IsCancelled then
+                        running
+                    else
+                        start ()
+            )
+
+        match inFlight.TryJoin cancellationToken with
+        | ValueSome work -> struct (inFlight, work)
+        | ValueNone -> joinClassification documentId version start cancellationToken
+
     // Requests for the same version that overlap - split views, the taggers above and below the
     // viewport - share one classification instead of each walking the whole file.
     static let classifyOpenDocument (document: Document) (version: ClassificationVersion) (sourceText: SourceText) =
@@ -270,19 +314,11 @@ type internal FSharpClassificationService [<ImportingConstructor>] () =
             let start () =
                 InFlightClassification(version, classifyWholeFile document version sourceText)
 
-            let inFlight =
-                inFlightClassifications.AddOrUpdate(
-                    document.Id,
-                    (fun _ -> start ()),
-                    fun _ running ->
-                        if running.Version = version && not running.IsCancelled then
-                            running
-                        else
-                            start ()
-                )
+            let struct (inFlight, work) =
+                joinClassification document.Id version start cancellationToken
 
             try
-                return! inFlight.Join cancellationToken
+                return! work
             finally
                 // A waiter that leaves early keeps the entry for those still waiting.
                 if inFlight.IsCompleted || inFlight.IsCancelled then
@@ -417,8 +453,8 @@ type internal FSharpClassificationService [<ImportingConstructor>] () =
                                 SemanticVersion = semanticVersion
                             }
 
-                        match openDocumentClassifications.TryGetValue document.Id with
-                        | true, classification when classification.Version = version ->
+                        match tryGetRemembered document.Id with
+                        | ValueSome classification when classification.Version = version ->
                             let eventProps: (string * obj) array =
                                 [|
                                     "context.document.project.id", document.Project.Id.Id.ToString()

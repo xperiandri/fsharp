@@ -686,6 +686,20 @@ type Document with
                 | None -> return ValueNone
         }
 
+    /// Parses and checks the given F# document; ValueNone while its project has no compilation options
+    /// or the check was aborted.
+    member this.TryGetFSharpParseAndCheckResultsAsync
+        (userOpName)
+        : CancellableTask<struct (FSharpParseFileResults * FSharpCheckFileResults) voption> =
+        cancellableTask {
+            match! this.TryGetFSharpCompilationOptionsAsync(userOpName) with
+            | ValueNone -> return ValueNone
+            | ValueSome options ->
+                match! options.Checker.ParseAndCheckDocument(this, options.ProjectOptions, userOpName, allowStaleResults = false) with
+                | Some(parseResults, checkResults) -> return ValueSome(struct (parseResults, checkResults))
+                | None -> return ValueNone
+        }
+
     /// Parses and checks the given F# document.
     member this.GetFSharpParseAndCheckResultsAsync(userOpName) =
         cancellableTask {

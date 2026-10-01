@@ -17,6 +17,7 @@ open Microsoft.CodeAnalysis.ExternalAccess.FSharp.Classification
 open FSharp.Compiler.CodeAnalysis
 open FSharp.Editor.Tests.Helpers
 open FSharp.Test
+open FSharp.Test.ProjectGeneration
 open Microsoft.VisualStudio.FSharp.Editor.CancellableTasks
 
 type SemanticClassificationServiceTests() =
@@ -82,35 +83,40 @@ type SemanticClassificationServiceTests() =
             SemanticVersion = VersionStamp.Create()
         }
 
+    let joinNow (inFlight: InFlightClassification) cancellationToken =
+        match inFlight.TryJoin cancellationToken with
+        | ValueSome work -> work
+        | ValueNone -> failwith "The classification refused a waiter."
+
     let lineSpan (text: SourceText) firstLine lastLine =
         TextSpan.FromBounds(text.Lines[firstLine].Start, text.Lines[lastLine].End)
 
     let clearProjectOptions (document: Document) =
         document.Project.Solution.Workspace.Services.GetService<IFSharpWorkspaceService>().FSharpProjectOptionsManager.ClearAllCaches()
 
-    // Two files of one project, the second using what the first declares, with the second one open.
+    // Two files of one project on disk, the second using what the first declares, with the second one open.
     let openDependentDocument (declarations: string) (usage: string) =
-        let projectId = ProjectId.CreateNewId()
-        let declarationsPath = "C:\\declarations.fs"
-        let usagePath = "C:\\usage.fs"
+        let project =
+            { SyntheticProject.Create(
+                  { sourceFile "Declarations" [] with
+                      Source = declarations
+                  },
+                  { sourceFile "Usage" [ "Declarations" ] with
+                      Source = usage
+                  }
+              ) with
+                AutoAddModules = false
+            }
 
-        let declarationsInfo =
-            RoslynTestHelpers.CreateDocumentInfo projectId declarationsPath declarations
+        let solution, _ = RoslynTestHelpers.CreateSolution project
 
-        let usageInfo = RoslynTestHelpers.CreateDocumentInfo projectId usagePath usage
+        let documentIdOf fileId =
+            solution.GetDocumentIdsWithFilePath(project.GetFilePath fileId)
+            |> Seq.exactlyOne
 
-        let projectInfo =
-            RoslynTestHelpers.CreateProjectInfo projectId "C:\\test.fsproj" [ declarationsInfo; usageInfo ]
-
-        let solution = RoslynTestHelpers.CreateSolution [ projectInfo ]
-
-        { RoslynTestHelpers.DefaultProjectOptions with
-            SourceFiles = [| declarationsPath; usagePath |]
-        }
-        |> RoslynTestHelpers.SetProjectOptions projectId solution
-
-        solution.Workspace.OpenDocument usageInfo.Id
-        declarationsInfo.Id, usageInfo.Id, solution.Workspace
+        let usageId = documentIdOf "Usage"
+        solution.Workspace.OpenDocument usageId
+        documentIdOf "Declarations", usageId, solution.Workspace
 
     // A project whose options were never supplied, i.e. one Visual Studio is still loading.
     let openDocumentWithoutProjectOptions (source: string) =
@@ -561,30 +567,32 @@ let result2 = s.(*2*)IsHyperbolicCaseWithLongName
         Assert.Equal<ClassifiedSpan list>(first, classify document spanA)
 
     // What a document's symbols mean is decided by the whole project, so an edit in another file
-    // reclassifies this one while its own text version stays put.
+    // reclassifies this one while its own text version stays put. Whether the checker then sees the
+    // new declaration is its own business; the service's part is not to answer from what it kept.
     [<Fact>]
     member _.``Semantic classification of an open document follows a change to another file of its project``() =
         let declarationsId, usageId, workspace =
-            openDependentDocument "module Declarations\nlet counter = 1" "open Declarations\nlet read () = counter"
+            openDependentDocument "module Declarations\nlet counter = 1" "module Usage\nopen Declarations\nlet read () = counter"
+
+        let usage () =
+            workspace.CurrentSolution.GetDocument usageId
 
         let classifyUsage () =
-            let document = workspace.CurrentSolution.GetDocument usageId
+            classify (usage ()) (TextSpan(0, (sourceTextOf (usage ())).Length))
 
-            classify document (TextSpan(0, (sourceTextOf document).Length))
-            |> List.map _.ClassificationType
-
-        let before = classifyUsage ()
-        Assert.NotEmpty before
-        Assert.DoesNotContain(FSharpClassificationTypes.MutableVar, before)
-
-        let mutableCounter = SourceText.From "module Declarations\nlet mutable counter = 1"
+        Assert.NotEmpty(classifyUsage ())
+        Assert.True(isRemembered (usage ()), "The first classification must be remembered.")
 
         Assert.True(
-            workspace.TryApplyChanges(workspace.CurrentSolution.WithDocumentText(declarationsId, mutableCounter)),
+            workspace.TryApplyChanges(
+                workspace.CurrentSolution.WithDocumentText(declarationsId, SourceText.From "module Declarations\nlet mutable counter = 1")
+            ),
             "The workspace has to accept the change to the other file."
         )
 
-        Assert.Contains(FSharpClassificationTypes.MutableVar, classifyUsage ())
+        Assert.False(isRemembered (usage ()), "An edit in another file must leave the kept classification behind.")
+        Assert.NotEmpty(classifyUsage ())
+        Assert.True(isRemembered (usage ()), "The document must be classified again for the new semantics.")
 
     // Roslyn replaces a span's tags with whatever comes back, so "no result" must re-emit the last
     // good one rather than strip the colours the user already sees.
@@ -657,8 +665,8 @@ let result2 = s.(*2*)IsHyperbolicCaseWithLongName
                     gate.Task
             )
 
-        let first = inFlight.Join CancellationToken.None
-        let second = inFlight.Join CancellationToken.None
+        let first = joinNow inFlight CancellationToken.None
+        let second = joinNow inFlight CancellationToken.None
         Assert.False(first.IsCompleted || second.IsCompleted)
 
         let classification =
@@ -689,8 +697,8 @@ let result2 = s.(*2*)IsHyperbolicCaseWithLongName
 
         use first = new CancellationTokenSource()
         use second = new CancellationTokenSource()
-        let firstJoin = inFlight.Join first.Token
-        let secondJoin = inFlight.Join second.Token
+        let firstJoin = joinNow inFlight first.Token
+        let secondJoin = joinNow inFlight second.Token
 
         first.Cancel()
 
@@ -707,3 +715,86 @@ let result2 = s.(*2*)IsHyperbolicCaseWithLongName
 
         Assert.True(sharedToken.Value.IsCancellationRequested, "The last waiter leaving must cancel the work.")
         Assert.True inFlight.IsCancelled
+
+    // A caller that found the instance just before its last waiter left must not wait on the work
+    // that waiter cancelled; it is turned away and starts a classification of its own.
+    [<Fact>]
+    member _.``A shared classification its last waiter abandoned cannot be joined``() =
+        let inFlight =
+            InFlightClassification(someVersion (), fun _ -> TaskCompletionSource<OpenDocumentClassification voption>().Task)
+
+        use only = new CancellationTokenSource()
+        let onlyJoin = joinNow inFlight only.Token
+        only.Cancel()
+
+        Assert.ThrowsAny<OperationCanceledException>(fun () -> onlyJoin.GetAwaiter().GetResult() |> ignore)
+        |> ignore
+
+        Assert.True((inFlight.TryJoin CancellationToken.None).IsNone)
+
+    // Defines can disable every declaration of a file whose text stays the same; the lookup computed
+    // before no longer describes it. The check still classifies the file's implicit module, so the
+    // result is a new answer, not the "nothing" that falls back to the last good lookup.
+    [<Fact>]
+    member _.``Semantic classification of a file whose every declaration went inactive drops their colours``() =
+        let source = "#if FOO\nlet mutable x = 1\nx <- 2\n#endif"
+
+        let withFoo =
+            { RoslynTestHelpers.DefaultProjectOptions with
+                OtherOptions = [| "--define:FOO" |]
+            }
+
+        let solution = RoslynTestHelpers.CreateSolution(source, withFoo)
+        let documentId = (RoslynTestHelpers.GetSingleDocument solution).Id
+        solution.Workspace.OpenDocument documentId
+        let document = solution.Workspace.CurrentSolution.GetDocument documentId
+        let text = sourceTextOf document
+
+        Assert.Contains(FSharpClassificationTypes.MutableVar, classify document (TextSpan(0, text.Length)) |> List.map _.ClassificationType)
+
+        clearProjectOptions document
+        RoslynTestHelpers.SetProjectOptions document.Project.Id document.Project.Solution RoslynTestHelpers.DefaultProjectOptions
+        let reopened = document.WithText(SourceText.From source)
+
+        let afterwards =
+            classify reopened (TextSpan(0, (sourceTextOf reopened).Length))
+            |> List.map _.ClassificationType
+
+        Assert.DoesNotContain(FSharpClassificationTypes.MutableVar, afterwards)
+
+    // The service re-emits the last good lookup through this: a cancellation raised inside the
+    // classification while the caller's token is still live is a superseded check, not the caller leaving.
+    [<Fact>]
+    member _.``A cancellation the caller did not ask for runs the fallback instead``() =
+        let fellBack = ref false
+
+        let cancelledInside: CancellableTask<unit> =
+            fun _ -> Task.FromCanceled<unit>(CancellationToken(true))
+
+        (cancelledInside
+         |> CancellableTask.ifCanceledThen (fun () -> fellBack.Value <- true)
+         |> CancellableTask.startAsTask CancellationToken.None)
+            .GetAwaiter()
+            .GetResult()
+
+        Assert.True(fellBack.Value, "An inner cancellation must fall back.")
+
+    [<Fact>]
+    member _.``A cancellation the caller asked for propagates without the fallback``() =
+        let fellBack = ref false
+        use caller = new CancellationTokenSource()
+
+        let cancelledByCaller: CancellableTask<unit> =
+            fun ct ->
+                caller.Cancel()
+                Task.FromCanceled<unit>(ct)
+
+        let task =
+            cancelledByCaller
+            |> CancellableTask.ifCanceledThen (fun () -> fellBack.Value <- true)
+            |> CancellableTask.startAsTask caller.Token
+
+        Assert.ThrowsAny<OperationCanceledException>(fun () -> task.GetAwaiter().GetResult())
+        |> ignore
+
+        Assert.False(fellBack.Value, "The caller's own cancellation must not fall back.")
