@@ -646,7 +646,7 @@ type internal FSharpConvertOptionalParameterDefaultValueRefactoring [<ImportingC
                                     let changedSolution =
                                         cancellableTask {
                                             let! cancellationToken = CancellableTask.getCancellationToken ()
-                                            let! memberUses = SymbolHelpers.getSymbolUses memberUse document checkResults
+                                            let! memberUses = SymbolHelpers.getSymbolUses memberUse document checkResults RelatedSymbolUseKind.AllInCode
 
                                             let usesByDocument =
                                                 memberUses
