@@ -99,7 +99,7 @@ let private withCacheDirectory (test: string -> Task) : Task =
 /// its data under the cache directory.
 let private session cacheDirectory =
     let exportProvider = MefHelpers.createExportProvider ()
-    exportProvider.GetExportedValue<FSharpPersistentStorageConfiguration>().CacheDirectory <- cacheDirectory
+    exportProvider.GetExportedValue<FSharpPersistentStorageConfiguration>().CacheDirectory <- ValueSome cacheDirectory
     exportProvider
 
 let private searchService cacheDirectory : IFSharpNavigateToSearchService =
