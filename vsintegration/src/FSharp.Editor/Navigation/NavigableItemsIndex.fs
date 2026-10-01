@@ -107,16 +107,16 @@ let private write (writer: BinaryWriter) (items: NavigableItem array) =
             | NavigableContainer.File fileName ->
                 writer.Write FileTag
                 writer.Write fileName
-            | NavigableContainer.Container info ->
-                writeContainer info.Parent
+            | NavigableContainer.Container(containerType, nameParts, parent) ->
+                writeContainer parent
                 writer.Write ContainerTag
-                writer.Write(containerTypeTag info.ContainerType)
-                writer.Write info.NameParts.Length
+                writer.Write(containerTypeTag containerType)
+                writer.Write nameParts.Length
 
-                for part in info.NameParts do
+                for part in nameParts do
                     writer.Write part
 
-                writer.Write numbers[info.Parent]
+                writer.Write numbers[parent]
 
             numbers[container] <- numbers.Count
 
@@ -153,12 +153,7 @@ let private read (reader: BinaryReader) =
         let nameParts = List.init (reader.ReadInt32()) (fun _ -> reader.ReadString())
         let parent = container (reader.ReadInt32())
 
-        NavigableContainer.Container
-            {
-                ContainerType = containerType
-                NameParts = nameParts
-                Parent = parent
-            }
+        NavigableContainer.Container(containerType, nameParts, parent)
 
     let readItem () =
         let name = reader.ReadString()
