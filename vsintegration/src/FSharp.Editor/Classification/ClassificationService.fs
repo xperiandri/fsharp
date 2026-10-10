@@ -268,7 +268,7 @@ type internal FSharpClassificationService [<ImportingConstructor>] () =
             | ValueNone -> return ValueNone
             | ValueSome(struct (_, checkResults)) ->
                 let classificationData =
-                    checkResults.GetSemanticClassification(None, RelatedSymbolUseKind.All)
+                    checkResults.GetSemanticClassification(None, RelatedSymbolUseKind.AllInCode)
 
                 // Every checked file resolves at least its enclosing module - an implicit one as a
                 // zero-width item - so nothing here means the classification itself failed (an

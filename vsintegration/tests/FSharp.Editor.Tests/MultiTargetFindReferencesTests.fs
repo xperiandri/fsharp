@@ -115,7 +115,7 @@ let private usesByDocument (document: Document) =
         checkFileResults.GetSymbolUseAtLocation(fcsLine, lexerSymbol.Ident.idRange.EndColumn, textLine.ToString(), lexerSymbol.FullIsland)
         |> Option.defaultWith (fun () -> failwith "symbol use not found")
 
-    SymbolHelpers.getSymbolUsesInSolution (symbolUse, checkFileResults, document, RelatedSymbolUseKind.All)
+    SymbolHelpers.getSymbolUsesInSolution (symbolUse, checkFileResults, document, RelatedSymbolUseKind.AllInCode)
     |> CancellableTask.runSynchronouslyWithoutCancellation
 
 [<Theory>]
