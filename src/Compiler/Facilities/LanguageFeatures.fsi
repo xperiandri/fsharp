@@ -38,6 +38,7 @@ type LanguageFeature =
     | BetterAnonymousRecordParsing
     | ScopedNowarn
     | ErrorOnInvalidDeclsInTypeDefinitions
+    | AllowMixedRangesAndValuesInSeqExpressions
     | AllowTypedLetUseAndBang
     | ReturnFromFinal
     | MoreConcreteTiebreaker
