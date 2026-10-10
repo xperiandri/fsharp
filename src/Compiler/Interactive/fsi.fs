@@ -44,7 +44,6 @@ open FSharp.Compiler.CompilerImports
 open FSharp.Compiler.DependencyManager
 open FSharp.Compiler.Diagnostics
 open FSharp.Compiler.DiagnosticsLogger
-open FSharp.Compiler.Features
 open FSharp.Compiler.IlxGen
 open FSharp.Compiler.Interactive
 open FSharp.Compiler.InfoReader
@@ -252,7 +251,7 @@ module internal Utilities =
 
     let reportError m =
         let report errorType err msg =
-            let error = err, msg
+            let error = err, RichText.mkText msg
 
             match errorType with
             | ErrorReportType.Warning -> warning (Error(error, m))
@@ -326,7 +325,7 @@ type ILMultiInMemoryAssemblyEmitEnv
         asmName
 
     /// Convert an ILAssemblyRef to a dynamic System.Type given the dynamic emit context
-    let convResolveAssemblyRef (asmref: ILAssemblyRef) qualifiedName =
+    let convResolveAssemblyRef (asmref: ILAssemblyRef) (tref: ILTypeRef) =
         let assembly =
             match resolveAssemblyRef asmref with
             | Some(Choice1Of2 path) ->
@@ -339,27 +338,44 @@ type ILMultiInMemoryAssemblyEmitEnv
                 let asmName = convAssemblyRef asmref
                 FileSystem.AssemblyLoader.AssemblyLoad asmName
 
-        let typT = assembly.GetType qualifiedName
+        let typT = assembly.GetType tref.BasicQualifiedName
 
         match typT with
-        | null -> error (Error(FSComp.SR.itemNotFoundDuringDynamicCodeGen ("type", qualifiedName, asmref.QualifiedName), range0))
+        | null ->
+            error (
+                Error(
+                    FSComp.SR.itemNotFoundDuringDynamicCodeGen (
+                        RichText.mkText "type",
+                        richTextOfILTypeRef tref,
+                        RichText.mkText asmref.QualifiedName
+                    ),
+                    range0
+                )
+            )
         | res -> res
 
     /// Convert an Abstract IL type reference to System.Type
     let convTypeRefAux (tref: ILTypeRef) =
-        let qualifiedName =
-            (String.concat "+" (tref.Enclosing @ [ tref.Name ])).Replace(",", @"\,")
-
         match tref.Scope with
-        | ILScopeRef.Assembly asmref -> convResolveAssemblyRef asmref qualifiedName
+        | ILScopeRef.Assembly asmref -> convResolveAssemblyRef asmref tref
         | ILScopeRef.Module _
         | ILScopeRef.Local ->
-            let typT = Type.GetType qualifiedName
+            let typT = Type.GetType tref.BasicQualifiedName
 
             match typT with
-            | null -> error (Error(FSComp.SR.itemNotFoundDuringDynamicCodeGen ("type", qualifiedName, "<emitted>"), range0))
+            | null ->
+                error (
+                    Error(
+                        FSComp.SR.itemNotFoundDuringDynamicCodeGen (
+                            RichText.mkText "type",
+                            richTextOfILTypeRef tref,
+                            RichText.mkText "<emitted>"
+                        ),
+                        range0
+                    )
+                )
             | res -> res
-        | ILScopeRef.PrimaryAssembly -> convResolveAssemblyRef ilg.primaryAssemblyRef qualifiedName
+        | ILScopeRef.PrimaryAssembly -> convResolveAssemblyRef ilg.primaryAssemblyRef tref
 
     /// Convert an ILTypeRef to a dynamic System.Type given the dynamic emit context
     let convTypeRef (tref: ILTypeRef) =
@@ -385,7 +401,14 @@ type ILMultiInMemoryAssemblyEmitEnv
         match res with
         | null ->
             error (
-                Error(FSComp.SR.itemNotFoundDuringDynamicCodeGen ("type", tspec.TypeRef.QualifiedName, tspec.Scope.QualifiedName), range0)
+                Error(
+                    FSComp.SR.itemNotFoundDuringDynamicCodeGen (
+                        RichText.mkText "type",
+                        richTextOfILTypeRef tspec.TypeRef,
+                        RichText.mkText tspec.Scope.QualifiedName
+                    ),
+                    range0
+                )
             )
         | _ -> res
 
@@ -964,11 +987,19 @@ type internal FsiCommandLineOptions(fsi: FsiEvaluationSessionHostConfig, argv: s
     let mutable fsiServerOutputCodePage = None
     let mutable fsiLCID = None
 
+    let mutable fsiServerJsonRpcPipe = ""
+    let mutable fsiServerClientProcessId = None
+
     // internal options
     let mutable probeToSeeIfConsoleWorks = true
     let mutable peekAheadOnConsoleToPermitTyping = true
 
-    let isInteractiveServer () = fsiServerName <> ""
+    let isJsonRpcServer () = fsiServerJsonRpcPipe <> ""
+
+    // Neither server mode has a user at a console, so neither uses the console reader.
+    let isInteractiveServer () =
+        fsiServerName <> "" || isJsonRpcServer ()
+
     let recordExplicitArg arg = explicitArgs <- explicitArgs @ [ arg ]
 
     let executableFileNameWithoutExtension =
@@ -1050,6 +1081,8 @@ type internal FsiCommandLineOptions(fsi: FsiEvaluationSessionHostConfig, argv: s
                 [ // Make internal fsi-server* options. Do not print in the help. They are used by VFSI.
                     CompilerOption("fsi-server-report-references", "", OptionString(fun s -> writeReferencesAndExit <- Some s), None, None)
                     CompilerOption("fsi-server", "", OptionString(fun s -> fsiServerName <- s), None, None) // "FSI server mode on given named channel");
+                    CompilerOption("fsi-server-jsonrpc", "", OptionString(fun s -> fsiServerJsonRpcPipe <- s), None, None) // "FSI server mode speaking JSON-RPC over the given named pipe"
+                    CompilerOption("fsi-server-client-pid", "", OptionInt(fun n -> fsiServerClientProcessId <- Some n), None, None) // "Process id of the host; the JSON-RPC server exits when it does"
                     CompilerOption("fsi-server-input-codepage", "", OptionInt(fun n -> fsiServerInputCodePage <- Some(n)), None, None) // " Set the input codepage for the console");
                     CompilerOption("fsi-server-output-codepage", "", OptionInt(fun n -> fsiServerOutputCodePage <- Some(n)), None, None) // " Set the output codepage for the console");
                     CompilerOption(
@@ -1311,15 +1344,14 @@ type internal FsiCommandLineOptions(fsi: FsiEvaluationSessionHostConfig, argv: s
             """    #help "idn";;                                 // %s"""
             (FSIstrings.SR.fsiIntroTextHashhelpdocInfo ())
 
-        if tcConfigB.langVersion.SupportsFeature(LanguageFeature.PackageManagement) then
-            for msg in
-                dependencyProvider.GetRegisteredDependencyManagerHelpText(
-                    tcConfigB.compilerToolPaths,
-                    getOutputDir tcConfigB,
-                    tcConfigB.sdkDirOverride,
-                    reportError m
-                ) do
-                fsiConsoleOutput.uprintfn "%s" msg
+        for msg in
+            dependencyProvider.GetRegisteredDependencyManagerHelpText(
+                tcConfigB.compilerToolPaths,
+                getOutputDir tcConfigB,
+                tcConfigB.sdkDirOverride,
+                reportError m
+            ) do
+            fsiConsoleOutput.uprintfn "%s" msg
 
         fsiConsoleOutput.uprintfn """    #clear;;                                      // %s""" (FSIstrings.SR.fsiIntroTextHashclearInfo ())
 
@@ -1360,6 +1392,16 @@ type internal FsiCommandLineOptions(fsi: FsiEvaluationSessionHostConfig, argv: s
     member _.UseServerPrompt = isInteractiveServer ()
 
     member _.IsInteractiveServer = isInteractiveServer ()
+
+    member _.IsJsonRpcServer = isJsonRpcServer ()
+
+    member _.JsonRpcServerPipeName =
+        if isJsonRpcServer () then
+            Some fsiServerJsonRpcPipe
+        else
+            None
+
+    member _.JsonRpcClientProcessId = fsiServerClientProcessId
 
     member _.ProbeToSeeIfConsoleWorks = probeToSeeIfConsoleWorks
 
@@ -1453,7 +1495,9 @@ type internal FsiConsolePrompt(fsiOptions: FsiCommandLineOptions, fsiConsoleOutp
     // A prompt gets "printed ahead" at start up. Tells users to start type while initialisation completes.
     // A prompt can be skipped by "silent directives", e.g. ones sent to FSI by VS.
     let mutable dropPrompt = 0
-    let mutable showPrompt = true
+
+    // A JSON-RPC host learns an interaction finished from the response to its request.
+    let mutable showPrompt = not fsiOptions.IsJsonRpcServer
 
     // NOTE: SERVER-PROMPT is not user displayed, rather it's a prefix that code elsewhere
     // uses to identify the prompt, see service\FsPkgs\FSharp.VS.FSI\fsiSessionToolWindow.fs
@@ -1496,16 +1540,12 @@ type internal FsiConsoleInput
 
     let consoleOpt =
         // The "console.fs" code does a limited form of "TAB-completion".
-        // Currently, it turns on if it looks like we have a console.
-        if fsiOptions.EnableConsoleKeyProcessing then
+        // Currently, it turns on if it looks like we have a console. A session driven by a host has
+        // no user at a console, whatever the probe would say.
+        if fsiOptions.EnableConsoleKeyProcessing && not fsiOptions.IsInteractiveServer then
             fsi.GetOptionalConsoleReadLine(fsiOptions.ProbeToSeeIfConsoleWorks)
         else
             None
-
-    // When VFSI is running, there should be no "console", and in particular the console.fs readline code should not to run.
-    do
-        if fsiOptions.IsInteractiveServer then
-            assert consoleOpt.IsNone
 
     /// This threading event gets set after the first-line-reader has finished its work
     let consoleReaderStartupDone = new ManualResetEvent(false)
@@ -1925,7 +1965,11 @@ type internal FsiDynamicCompiler
             {
                 ilg = tcGlobals.ilg
                 outfile = $"{multiAssemblyName}-{dynamicAssemblyId}.dll"
-                pdbfile = Some(Path.Combine(scriptingSymbolsPath, $"{multiAssemblyName}-{dynamicAssemblyId}.pdb"))
+                pdbfile =
+                    if tcConfig.debuginfo then
+                        Some(Path.Combine(scriptingSymbolsPath, $"{multiAssemblyName}-{dynamicAssemblyId}.pdb"))
+                    else
+                        None
                 emitTailcalls = tcConfig.emitTailcalls
                 deterministic = tcConfig.deterministic
                 portablePDB = true
@@ -1941,6 +1985,7 @@ type internal FsiDynamicCompiler
                 referenceAssemblyAttribOpt = None
                 referenceAssemblySignatureHash = None
                 pathMap = tcConfig.pathMap
+                moduleCustomDebugInfoRows = []
                 methodCustomDebugInfoRows = Map.empty
             }
 
@@ -2225,7 +2270,8 @@ type internal FsiDynamicCompiler
             ApplyAllOptimizations(
                 tcConfig,
                 tcGlobals,
-                LightweightTcValForUsingInBuildMethodCall tcGlobals,
+                // traitCtxtNone: FSI codegen — SRTP constraints already resolved, no TcEnv available (audited for RFC FS-1043)
+                LightweightTcValForUsingInBuildMethodCall tcGlobals traitCtxtNone,
                 outfile,
                 importMap,
                 isIncrementalFragment,
@@ -2803,7 +2849,7 @@ type internal FsiDynamicCompiler
                         )
                     with
                     | Null ->
-                        let err =
+                        let number, message =
                             fsiOptions.DependencyProvider.CreatePackageManagerUnknownError(
                                 tcConfigB.compilerToolPaths,
                                 outputDir,
@@ -2812,7 +2858,7 @@ type internal FsiDynamicCompiler
                                 reportError m
                             )
 
-                        errorR (Error(err, m))
+                        errorR (Error((number, message), m))
                         istate
                     | NonNull dependencyManager ->
                         let directive d =
@@ -2902,12 +2948,8 @@ type internal FsiDynamicCompiler
             istate, CompletedWithAlreadyReportedError
 
         | _, NonNull dependencyManager ->
-            if tcConfigB.langVersion.SupportsFeature(LanguageFeature.PackageManagement) then
-                fsiDynamicCompiler.AddDelayedDependencyManagerText(dependencyManager, directiveKind, m, path)
-                istate, Completed None
-            else
-                errorR (Error(FSComp.SR.packageManagementRequiresVFive (), m))
-                istate, Completed None
+            fsiDynamicCompiler.AddDelayedDependencyManagerText(dependencyManager, directiveKind, m, path)
+            istate, Completed None
 
         | _, _ when directiveKind = Directive.Include ->
             errorR (Error(FSComp.SR.poundiNotSupportedByRegisteredDependencyManagers (), m))
@@ -3043,7 +3085,7 @@ type internal FsiDynamicCompiler
             )
 
             if IsCompilerGeneratedName name then
-                invalidArg "name" (FSComp.SR.lexhlpIdentifiersContainingAtSymbolReserved () |> snd)
+                invalidArg "name" (FSComp.SR.lexhlpIdentifiersContainingAtSymbolReserved () |> snd).Text
 
             let istate, tys = importReflectionType istate (value.GetType())
             let ty = List.head tys
@@ -3147,7 +3189,14 @@ type internal FsiDynamicCompiler
             GetInitialTcState(rangeStdin0, ccuName, tcConfig, tcGlobals, tcImports, tcEnv, openDecls0)
 
         let ilxGenerator =
-            CreateIlxAssemblyGenerator(tcConfig, tcImports, tcGlobals, (LightweightTcValForUsingInBuildMethodCall tcGlobals), tcState.Ccu)
+            // traitCtxtNone: FSI codegen — SRTP constraints already resolved, no TcEnv available (audited for RFC FS-1043)
+            CreateIlxAssemblyGenerator(
+                tcConfig,
+                tcImports,
+                tcGlobals,
+                (LightweightTcValForUsingInBuildMethodCall tcGlobals traitCtxtNone),
+                tcState.Ccu
+            )
 
         {
             optEnv = optEnv0
@@ -3876,7 +3925,13 @@ type FsiInteractionProcessor
             | "show" -> fsiConsolePrompt.ShowPrompt <- true
             | "hide" -> fsiConsolePrompt.ShowPrompt <- false
             | "skip" -> fsiConsolePrompt.SkipNext()
-            | _ -> error (Error((FSComp.SR.fsiInvalidDirective ("prompt", String.concat " " [ showPrompt ])), m))
+            | _ ->
+                error (
+                    Error(
+                        (FSComp.SR.fsiInvalidDirective (RichText.mkKeyword "prompt", RichText.mkText (String.concat " " [ showPrompt ]))),
+                        m
+                    )
+                )
 
             istate, Completed None
 
@@ -3943,13 +3998,13 @@ type FsiInteractionProcessor
             match args with
             | [] -> fsiOptions.ShowHelp(m)
             | [ arg ] -> runhDirective diagnosticsLogger ctok istate arg
-            | _ -> warning (Error((FSComp.SR.fsiInvalidDirective ("help", String.concat " " args)), m))
+            | _ -> warning (Error((FSComp.SR.fsiInvalidDirective (RichText.mkKeyword "help", RichText.mkText (String.concat " " args))), m))
 
             istate, Completed None
 
         | ParsedHashDirective(c, hashArguments, m) ->
             let arg = (parsedHashDirectiveArguments hashArguments tcConfigB.langVersion)
-            warning (Error((FSComp.SR.fsiInvalidDirective (c, String.concat " " arg)), m))
+            warning (Error((FSComp.SR.fsiInvalidDirective (RichText.mkKeyword c, RichText.mkText (String.concat " " arg))), m))
             istate, Completed None
 
     /// Most functions return a step status - this decides whether to continue and propagates the
@@ -4364,11 +4419,37 @@ type FsiInteractionProcessor
         let tokenizer =
             fsiStdinLexerProvider.CreateBufferLexer(scriptFileName, lexbuf, diagnosticsLogger)
 
-        currState
-        |> InteractiveCatch diagnosticsLogger (fun istate ->
-            let expr = ParseInteraction tcConfigB.diagnosticsOptions tokenizer
-            ExecuteParsedInteractionOnMainThread(ctok, diagnosticsLogger, expr, istate, cancellationToken))
-        |> commitResult
+        // The text may hold several interactions, as standard input would. Each one that completes
+        // is committed before the next is parsed, so that a failure later in the text keeps what ran
+        // before it; the value reported is that of the last interaction that produced one.
+        let rec run istate lastValue =
+            let errorsBefore = diagnosticsLogger.ErrorCount
+
+            let istate, status =
+                istate
+                |> InteractiveCatch diagnosticsLogger (fun istate ->
+                    match ParseInteraction tcConfigB.diagnosticsOptions tokenizer with
+                    | Some(ParsedScriptInteraction.Definitions([], _)) -> istate, Completed lastValue
+                    | expr -> ExecuteParsedInteractionOnMainThread(ctok, diagnosticsLogger, expr, istate, cancellationToken))
+
+            let status =
+                match status with
+                | Completed value -> Completed(Option.orElse lastValue value)
+                | status -> status
+
+            match status with
+            | Completed value when
+                diagnosticsLogger.ErrorCount = errorsBefore
+                && not tokenizer.LexBuffer.IsPastEndOfStream
+                ->
+                if cancellationToken.IsCancellationRequested then
+                    istate, CtrlC
+                else
+                    setCurrState istate
+                    run istate value
+            | _ -> istate, status
+
+        run currState None |> commitResult
 
     member this.EvalScript(ctok, scriptPath, diagnosticsLogger) =
         // Todo: this runs the script as expected but errors are displayed one line to far in debugger
@@ -4757,7 +4838,7 @@ type FsiEvaluationSession
         try
             let tcConfig = tcConfigP.Get(ctokStartup)
 
-            checker.FrameworkImportsCache.Get tcConfig |> Async.RunImmediate
+            checker.FrameworkImportsCache.Get tcConfig |> Async.RunSynchronouslyImmediate
         with e ->
             stopProcessingRecovery e range0
             failwithf "Error creating evaluation session: %A" e
@@ -4771,7 +4852,7 @@ type FsiEvaluationSession
                 unresolvedReferences,
                 fsiOptions.DependencyProvider
             )
-            |> Async.RunImmediate
+            |> Async.RunSynchronouslyImmediate
         with e ->
             stopProcessingRecovery e range0
             failwithf "Error creating evaluation session: %A" e
@@ -4909,6 +4990,10 @@ type FsiEvaluationSession
 
     /// A host calls this to get the active language ID if provided by fsi-server-lcid
     member _.LCID = fsiOptions.FsiLCID
+
+    member _.JsonRpcServerPipeName = fsiOptions.JsonRpcServerPipeName
+
+    member _.JsonRpcClientProcessId = fsiOptions.JsonRpcClientProcessId
 
     /// A host calls this to report an unhandled exception in a standard way, e.g. an exception on the GUI thread gets printed to stderr
     member x.ReportUnhandledException exn = x.ReportUnhandledExceptionSafe true exn
@@ -5059,7 +5144,9 @@ type FsiEvaluationSession
         // We later switch to doing interaction-by-interaction processing on the "event loop" thread
         let ctokRun = AssumeCompilationThreadWithoutEvidence()
 
-        if fsiOptions.IsInteractiveServer then
+        // The JSON-RPC server carries interrupts on its own connection and is started by the
+        // process entry point.
+        if fsiOptions.IsInteractiveServer && not fsiOptions.IsJsonRpcServer then
             SpawnInteractiveServer(fsi, fsiOptions, fsiConsoleOutput)
 
         use _ = UseBuildPhase BuildPhase.Interactive
@@ -5078,7 +5165,10 @@ type FsiEvaluationSession
                 | _ -> ())
 
             fsiInteractionProcessor.LoadInitialFiles(ctokRun, diagnosticsLogger)
-            fsiInteractionProcessor.StartStdinReadAndProcessThread(tcConfigB.diagnosticsOptions, diagnosticsLogger)
+
+            // Interactions arrive on the control channel, leaving stdin to the script.
+            if not fsiOptions.IsJsonRpcServer then
+                fsiInteractionProcessor.StartStdinReadAndProcessThread(tcConfigB.diagnosticsOptions, diagnosticsLogger)
 
             DriveFsiEventLoop(fsi, fsiInterruptController, fsiConsoleOutput)
 

@@ -98,6 +98,7 @@ module internal RoslynHelpers =
         | TextTag.Punctuation -> TextTags.Punctuation
         | TextTag.Text
         | TextTag.ModuleBinding // why no 'Identifier'? Does it matter?
+        | TextTag.UnresolvedName
         | TextTag.UnknownEntity -> TextTags.Text
 
     let CollectTaggedText (list: List<_>) (t: TaggedText) =
@@ -134,7 +135,9 @@ module internal RoslynHelpers =
                     return! computation
                 }
 
-        let tcs = new TaskCompletionSource<_>(TaskCreationOptions.None)
+        let tcs =
+            new TaskCompletionSource<_>(TaskCreationOptions.RunContinuationsAsynchronously)
+
         let barrier = VolatileBarrier()
 
         let reg =
@@ -286,11 +289,6 @@ module internal OpenDeclarationHelper =
                 sourceText
 
         sourceText, minPos |> Option.defaultValue 0
-
-[<AutoOpen>]
-module internal TaggedText =
-    let toString (tts: TaggedText[]) =
-        tts |> Array.map (fun tt -> tt.Text) |> String.concat ""
 
 // http://www.fssnip.net/7S3/title/Intersperse-a-list
 module List =

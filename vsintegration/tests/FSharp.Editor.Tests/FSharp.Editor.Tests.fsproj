@@ -28,6 +28,7 @@
     <Compile Include="CompletionProviderTests.fs" />
     <Compile Include="FindReferencesTests.fs" />
     <Compile Include="GoToDefinitionServiceTests.fs" />
+    <Compile Include="PathMapNavigationTests.fs" />
     <Compile Include="HelpContextServiceTests.fs" />
     <Compile Include="QuickInfoTests.fs" />
     <Compile Include="TaskListServiceTests.fs" />
@@ -85,6 +86,7 @@
     <Compile Include="SemanticClassificationServiceTests.fs" />
     <Compile Include="SyntacticColorizationServiceTests.fs" />
     <Compile Include="DocumentHighlightsServiceTests.fs" />
+    <Compile Include="TokenizerCacheConcurrencyTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

@@ -189,7 +189,7 @@ module CheckResultsExtensions =
 
         member this.GetSymbolUse(context: ResolveContext) =
             this.GetSymbolUses(context) |> List.exactlyOne
-    
+
         member this.GetTooltip(context: ResolveContext) =
             this.GetToolTip(context.Pos.Line, context.Pos.Column, context.LineText, context.Names, FSharpTokenTag.Identifier)
 
@@ -302,9 +302,7 @@ module AssertHelpers =
         Assert.Equal(1, items.Length)
         match items[0] with
         | ToolTipElement.Group [ singleElement ] ->
-            let toolTipText =
-                singleElement.MainDescription
-                |> taggedTextToString
-            toolTipText, singleElement.XmlDoc, singleElement.Remarks |> Option.map taggedTextToString
+            let toolTipText = singleElement.MainDescription.Text
+            toolTipText, singleElement.XmlDoc, singleElement.Remarks |> Option.map _.Text
         | _ -> failwith $"Expected group, got {items[0]}"
 
