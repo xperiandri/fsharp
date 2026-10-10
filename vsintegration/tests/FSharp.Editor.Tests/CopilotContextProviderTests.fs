@@ -147,6 +147,12 @@ let twice x = x * 2
                 LastLine = line
             }
 
+    /// A function and a member whose parameters each take a line, so their headers end lines below their names.
+    let private multilineHeaders =
+        "module Multiline\n\n/// Adds.\nlet add\n    (x: int)\n    (y: int) =\n    x + y\n\ntype Calculator() =\n    member _.Sum\n        (\n            x: int,\n            y: int\n        ) =\n        x * y\n"
+
+    let private multilineSolution = solutionOf [ "C:\\multiline.fs", multilineHeaders ]
+
     [<Theory>]
     [<InlineData("Counter", "Widgets.Counter")>]
     [<InlineData("Bump", "Widgets.Counter.Bump")>]
@@ -413,6 +419,35 @@ let twice x = x * 2
             CopilotSymbolQuery.declarationAt ValueNone declarations
             |> ValueOption.map (fun (struct (item, _)) -> item.Range.StartLine)
         )
+
+    [<Theory>]
+    [<InlineData("Multiline.add", "/// Adds.", "x + y")>]
+    [<InlineData("Multiline.Calculator.Sum", "member _.Sum", "x * y")>]
+    let ``a header over several lines keeps its declaration whole`` (name: string, firstLine: string, lastLine: string) =
+        let snippet = (contextIn cache multilineSolution name).Snippet.Trim()
+
+        Assert.StartsWith(firstLine, snippet, StringComparison.Ordinal)
+        Assert.EndsWith(lastLine, snippet, StringComparison.Ordinal)
+
+    [<Theory>]
+    [<InlineData(7, "Multiline.add", "Multiline.Calculator.Sum")>]
+    [<InlineData(15, "Multiline.Calculator.Sum", "Multiline.add")>]
+    let ``the caret in a body under a header over several lines selects its declaration`` (caretLine: int, around: string, apart: string) =
+        let focused = documentNamed "multiline.fs" multilineSolution
+
+        let hits =
+            hitsIn (freshCache ()) [ focused.Id ] (caretOn "C:\\multiline.fs" caretLine) multilineSolution ""
+
+        let focusOf name =
+            hits
+            |> Array.pick (fun (struct (item, _, focus)) ->
+                if CopilotSymbolMapping.fullyQualifiedName item = name then
+                    Some focus
+                else
+                    None)
+
+        Assert.Equal(DocumentFocus.Selected, focusOf around)
+        Assert.Equal(DocumentFocus.Focused, focusOf apart)
 
     [<Fact>]
     let ``a batch of texts answers like the same texts one by one`` () =

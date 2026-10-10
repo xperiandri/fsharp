@@ -100,13 +100,13 @@ module internal CopilotSymbolQuery =
         | DocumentFocus.Open -> 2
         | DocumentFocus.Elsewhere -> 3
 
-    /// The source of a document and the outlining of its declarations.
+    /// The source of a document and the constructs it declares, by line.
     [<Struct>]
     type private Outline =
         {
             Text: SourceText
             Lines: string array
-            Scopes: Structure.ScopeRange array
+            Declared: Dictionary<int, Structure.ScopeRange>
         }
 
     let private outlineOf (document: Document) =
@@ -122,7 +122,9 @@ module internal CopilotSymbolQuery =
                 {
                     Text = sourceText
                     Lines = sourceLines
-                    Scopes = Structure.getOutliningRanges sourceLines parseResults.ParseTree |> Seq.toArray
+                    Declared =
+                        Structure.getOutliningRanges sourceLines parseResults.ParseTree
+                        |> CopilotSymbolSnippets.declaredByLine
                 }
         }
 
@@ -137,7 +139,7 @@ module internal CopilotSymbolQuery =
             return
                 fun (item: NavigableItem) ->
                     let struct (firstLine, lastLine) =
-                        CopilotSymbolSnippets.declarationLines outline.Lines outline.Scopes item
+                        CopilotSymbolSnippets.declarationLines outline.Lines outline.Declared item
 
                     firstLine <= focus.LastLine && focus.FirstLine <= lastLine
         }
@@ -399,7 +401,7 @@ module internal CopilotSymbolQuery =
     /// The source of the whole declaration `item` names, together with the span it occupies.
     let private snippetOf (outline: Outline) (item: NavigableItem) =
         let struct (firstLine, lastLine) =
-            CopilotSymbolSnippets.definitionLines outline.Lines outline.Scopes item
+            CopilotSymbolSnippets.definitionLines outline.Lines outline.Declared item
 
         let text = outline.Text
         let firstLine = max 1 firstLine
