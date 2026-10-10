@@ -25,6 +25,11 @@ let FullyQualifiedNameInput = "fullyQualifiedName"
 [<Literal>]
 let DeclarationLineInput = "declarationLine"
 
+/// A line tells declarations apart only within a file, and the same type of two projects - or one file
+/// linked into both - declares one fully qualified name on one line twice.
+[<Literal>]
+let DeclarationFileInput = "declarationFile"
+
 /// The parse tree cannot tell an interface, struct or record apart from a plain class, so every
 /// type-like declaration is reported as a class.
 let symbolContextType kind =

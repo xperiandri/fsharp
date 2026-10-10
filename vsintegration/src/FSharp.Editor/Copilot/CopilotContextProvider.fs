@@ -347,7 +347,7 @@ module internal CopilotSymbolQuery =
 
     /// Declarations carrying exactly this fully qualified name. Signature files answer only when no
     /// implementation declares the name, so the search stops once an implementation has answered.
-    let declarationsOf
+    let private declarationsFound
         (cache: FSharpNavigableItemsCache)
         (openDocumentIds: DocumentId seq)
         (solution: Solution)
@@ -378,25 +378,62 @@ module internal CopilotSymbolQuery =
             let implementations =
                 hits
                 |> Seq.filter (fun (struct (_, document: Document)) -> not document.IsFSharpSignatureFile)
-                |> Seq.truncate MaxDeclarations
                 |> Seq.toArray
 
             return
                 match implementations with
-                | [||] -> hits |> Seq.truncate MaxDeclarations |> Seq.toArray
+                | [||] -> hits.ToArray()
                 | implementations -> implementations
         }
 
-    /// The declaration among `declarations` that a mention was picked for, when its line is still known
-    /// and still matches one of them - several overloads and partial definitions answer to the same
-    /// fully qualified name, so the first one found is no substitute once a line has been recorded.
-    let declarationAt (line: int voption) (declarations: struct (NavigableItem * Document) array) =
-        match line with
-        | ValueSome line ->
-            declarations
-            |> Array.tryFindV (fun (struct (item, _)) -> item.Range.StartLine = line)
-            |> ValueOption.orElseWith (fun () -> Array.tryHeadV declarations)
-        | ValueNone -> Array.tryHeadV declarations
+    /// The declarations of a name in the implementation file its mention was picked in, the one on the
+    /// picked line first - an edit above it moves that line, and the file is then still the one to answer.
+    let private declarationsPickedAt
+        (cache: FSharpNavigableItemsCache)
+        (solution: Solution)
+        (fullyQualifiedName: string)
+        (struct (filePath: string, line: int))
+        =
+        cancellableTask {
+            let pickedIn =
+                solution.GetDocumentIdsWithFilePath filePath
+                |> Seq.map (fun documentId -> solution.GetDocument documentId)
+                |> Seq.tryFindV (fun document -> document.Project.IsFSharp && not document.IsFSharpSignatureFile)
+
+            match pickedIn with
+            | ValueNone -> return Array.empty
+            | ValueSome document ->
+                let! items = cache.GetNavigableItems document
+
+                return
+                    items
+                    |> Seq.filter (CopilotSymbolMapping.hasFullyQualifiedName fullyQualifiedName)
+                    |> Seq.sortBy (fun item -> if item.Range.StartLine = line then 0 else 1)
+                    |> Seq.map (fun item -> struct (item, document))
+                    |> Seq.toArray
+        }
+
+    /// Declarations carrying exactly this fully qualified name, the one a mention was picked for first.
+    /// Overloads, partial definitions and the same type of two projects all answer to one name, and a line
+    /// tells them apart only within a file - so the file `picked` names answers alone while it still
+    /// declares the name, and the solution is searched for a mention typed by hand, which records neither.
+    let declarationsOf
+        (cache: FSharpNavigableItemsCache)
+        (openDocumentIds: DocumentId seq)
+        (solution: Solution)
+        (fullyQualifiedName: string)
+        (picked: struct (string * int) voption)
+        =
+        cancellableTask {
+            let! pickedDeclarations =
+                match picked with
+                | ValueSome picked -> declarationsPickedAt cache solution fullyQualifiedName picked
+                | ValueNone -> CancellableTask.singleton Array.empty
+
+            match pickedDeclarations with
+            | [||] -> return! declarationsFound cache openDocumentIds solution fullyQualifiedName
+            | declarations -> return declarations
+        }
 
     /// The source of the whole declaration `item` names, together with the span it occupies.
     let private snippetOf (outline: Outline) (item: NavigableItem) =
@@ -417,9 +454,11 @@ module internal CopilotSymbolQuery =
         (openDocumentIds: DocumentId seq)
         (solution: Solution)
         (fullyQualifiedName: string)
+        (picked: struct (string * int) voption)
         =
         cancellableTask {
-            let! declarations = declarationsOf cache openDocumentIds solution fullyQualifiedName
+            let! declarations = declarationsOf cache openDocumentIds solution fullyQualifiedName picked
+            let declarations = Array.truncate MaxDeclarations declarations
 
             match Array.tryHeadV declarations with
             | ValueNone -> return ValueNone
@@ -507,6 +546,12 @@ type internal FSharpCopilotContextProvider
                     IsRequired = true
                 )
                 CopilotInputDescriptor(
+                    CopilotSymbolMapping.DeclarationFileInput,
+                    "File the picked declaration is in.",
+                    CopilotDefaultTypes.StringName,
+                    IsRequired = false
+                )
+                CopilotInputDescriptor(
                     CopilotSymbolMapping.DeclarationLineInput,
                     "Line the picked overload or partial definition is declared on.",
                     CopilotDefaultTypes.IntegerName,
@@ -530,10 +575,14 @@ type internal FSharpCopilotContextProvider
         | DocumentFocus.Elsewhere -> CopilotQueriedMentionPriority.None
 
     let mentionFor (item: NavigableItem) (document: Document) focus =
-        let inputs = Dictionary<string, CopilotValue>(2, StringComparer.Ordinal)
+        let inputs = Dictionary<string, CopilotValue>(3, StringComparer.Ordinal)
 
         inputs[CopilotSymbolMapping.FullyQualifiedNameInput] <-
             CopilotValue(CopilotDefaultTypes.StringName, CopilotSymbolMapping.fullyQualifiedName item)
+
+        match document.FilePath with
+        | null -> ()
+        | filePath -> inputs[CopilotSymbolMapping.DeclarationFileInput] <- CopilotValue(CopilotDefaultTypes.StringName, filePath)
 
         inputs[CopilotSymbolMapping.DeclarationLineInput] <- CopilotValue(CopilotDefaultTypes.IntegerName, item.Range.StartLine)
 
@@ -587,19 +636,20 @@ type internal FSharpCopilotContextProvider
                         | ValueNone -> noMentions)
         }
 
-    let fullyQualifiedNameOf (inputs: IReadOnlyDictionary<string, CopilotValue> | null) =
+    let textOf (input: string) (inputs: IReadOnlyDictionary<string, CopilotValue> | null) =
         match inputs with
         | null -> ValueNone
         | inputs ->
-            match inputs.TryGetValue CopilotSymbolMapping.FullyQualifiedNameInput with
+            match inputs.TryGetValue input with
             | true, value ->
                 match value.TryGetValue<string>() with
-                | true, name when not (String.IsNullOrWhiteSpace name) -> ValueSome name
+                | true, text when not (String.IsNullOrWhiteSpace text) -> ValueSome text
                 | _ -> ValueNone
             | _ -> ValueNone
 
-    /// Which overload or partial definition of a fully qualified name a mention was picked for -
-    /// several of them share the same name, so navigating one has to tell them apart by more than that.
+    let fullyQualifiedNameOf inputs =
+        textOf CopilotSymbolMapping.FullyQualifiedNameInput inputs
+
     let declarationLineOf (inputs: IReadOnlyDictionary<string, CopilotValue> | null) =
         match inputs with
         | null -> ValueNone
@@ -610,6 +660,13 @@ type internal FSharpCopilotContextProvider
                 | true, line -> ValueSome line
                 | _ -> ValueNone
             | _ -> ValueNone
+
+    /// Which overload or partial definition of a fully qualified name a mention was picked for -
+    /// several of them share the same name, so navigating one has to tell them apart by more than that.
+    let pickedAt inputs =
+        match textOf CopilotSymbolMapping.DeclarationFileInput inputs, declarationLineOf inputs with
+        | ValueSome filePath, ValueSome line -> ValueSome(struct (filePath, line))
+        | _ -> ValueNone
 
     interface IExportedBrokeredService with
         member _.Descriptor = CopilotDescriptors.CreateContextProviderDescriptor moniker
@@ -638,7 +695,12 @@ type internal FSharpCopilotContextProvider
                 ->
                 cancellableTask {
                     let! symbol =
-                        CopilotSymbolQuery.symbolContext cache (workspace.GetOpenDocumentIds()) workspace.CurrentSolution fullyQualifiedName
+                        CopilotSymbolQuery.symbolContext
+                            cache
+                            (workspace.GetOpenDocumentIds())
+                            workspace.CurrentSolution
+                            fullyQualifiedName
+                            (pickedAt inputs)
 
                     match symbol with
                     | ValueNone -> return null
@@ -662,9 +724,15 @@ type internal FSharpCopilotContextProvider
                     let! ct = CancellableTask.getCancellationToken ()
                     let solution = workspace.CurrentSolution
 
-                    let! declarations = CopilotSymbolQuery.declarationsOf cache (workspace.GetOpenDocumentIds()) solution fullyQualifiedName
+                    let! declarations =
+                        CopilotSymbolQuery.declarationsOf
+                            cache
+                            (workspace.GetOpenDocumentIds())
+                            solution
+                            fullyQualifiedName
+                            (pickedAt mention.Inputs)
 
-                    match CopilotSymbolQuery.declarationAt (declarationLineOf mention.Inputs) declarations with
+                    match Array.tryHeadV declarations with
                     | ValueNone -> return false
                     | ValueSome(struct (item, document)) ->
                         let! sourceText = document.GetTextAsync ct

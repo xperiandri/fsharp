@@ -12,6 +12,7 @@ open Microsoft.CodeAnalysis.Text
 open Microsoft.VisualStudio.Copilot
 open Microsoft.VisualStudio.FSharp.Editor
 
+open FSharp.Compiler.EditorServices
 open FSharp.Editor.Tests.Helpers
 open CancellableTasks
 
@@ -106,10 +107,20 @@ let twice x = x * 2
                 None)
         |> Option.defaultWith (fun () -> failwith $"no declaration named {fullyQualifiedName}")
 
-    let private contextIn cache solution (name: string) =
-        CopilotSymbolQuery.symbolContext cache Seq.empty solution name
+    let private contextPickedIn cache solution (name: string) picked =
+        CopilotSymbolQuery.symbolContext cache Seq.empty solution name picked
         |> run
         |> ValueOption.defaultWith (fun () -> failwith $"expected a symbol context for {name}")
+
+    let private contextIn cache solution name =
+        contextPickedIn cache solution name ValueNone
+
+    let private declarationsPickedIn cache solution name picked =
+        CopilotSymbolQuery.declarationsOf cache Seq.empty solution name picked |> run
+
+    let private lineOf (struct (item: NavigableItem, _: Document)) = item.Range.StartLine
+
+    let private fileOf (struct (_: NavigableItem, document: Document)) = document.FilePath
 
     let private contextOf name = contextIn cache solution name
 
@@ -152,6 +163,21 @@ let twice x = x * 2
         "module Multiline\n\n/// Adds.\nlet add\n    (x: int)\n    (y: int) =\n    x + y\n\ntype Calculator() =\n    member _.Sum\n        (\n            x: int,\n            y: int\n        ) =\n        x * y\n"
 
     let private multilineSolution = solutionOf [ "C:\\multiline.fs", multilineHeaders ]
+
+    /// More overloads of one member than a context carries, each naming its parameter type in its body.
+    let private overloadsSolution =
+        let overloads =
+            [ "int"; "string"; "float"; "bool"; "char"; "byte" ]
+            |> List.map (fun parameterType ->
+                $"    member _.Bump(step: {parameterType}) =\n        ignore step\n        \"{parameterType}\"\n")
+            |> String.concat "\n"
+
+        solutionOf [ "C:\\overloads.fs", $"module Overloads\n\ntype Counter() =\n{overloads}" ]
+
+    /// One name on one line of two files, as when two projects declare the same type or share a linked file.
+    let private twinsSolution =
+        let twin = "namespace Twins\n\ntype Twin() =\n    member _.Value = 1\n"
+        solutionOf [ "C:\\first.fs", twin; "C:\\second.fs", twin ]
 
     [<Theory>]
     [<InlineData("Counter", "Widgets.Counter")>]
@@ -206,7 +232,7 @@ let twice x = x * 2
     [<Fact>]
     let ``an unknown name has no context`` () =
         Assert.True(
-            (CopilotSymbolQuery.symbolContext cache Seq.empty solution "Widgets.NoSuchThing"
+            (CopilotSymbolQuery.symbolContext cache Seq.empty solution "Widgets.NoSuchThing" ValueNone
              |> run)
                 .IsNone
         )
@@ -296,7 +322,7 @@ let twice x = x * 2
         Assert.Empty(searchIn cache Seq.empty solution "removedLater")
 
         Assert.True(
-            (CopilotSymbolQuery.symbolContext cache Seq.empty solution "Edited.removedLater"
+            (CopilotSymbolQuery.symbolContext cache Seq.empty solution "Edited.removedLater" ValueNone
              |> run)
                 .IsNone
         )
@@ -377,48 +403,62 @@ let twice x = x * 2
 
         Assert.Equal(expected, Array.head names)
 
-    /// Two overloads answer to the same fully qualified name, so navigating one after the picker has
-    /// closed - when there is no caret to consult any more - has to go by the line recorded when it was
-    /// picked, not by whichever overload a solution-wide scan happens to reach first.
+    let private overloadsPickedAt picked =
+        declarationsPickedIn cache overloadsSolution "Overloads.Counter.Bump" picked
+        |> Array.map lineOf
+
+    /// Overloads answer to the same fully qualified name, so navigating one after the picker has
+    /// closed - when there is no caret to consult any more - has to go by where it was picked,
+    /// not by whichever overload a solution-wide scan happens to reach first.
     [<Fact>]
     let ``navigating a mention goes to the overload it was picked for`` () =
-        let cache = freshCache ()
+        let lines = overloadsPickedAt ValueNone
+        Assert.Equal(6, (Array.distinct lines).Length)
 
-        let source =
-            "module Overloads\n\ntype Counter() =\n    member _.Bump() =\n        1\n\n    member _.Bump(step: int) =\n        step\n"
+        for line in lines do
+            let picked = overloadsPickedAt (ValueSome(struct ("C:\\overloads.fs", line)))
+            Assert.Equal(line, Array.head picked)
+            Assert.Equal(6, picked.Length)
 
-        let solution = solutionOf [ "C:\\overloads.fs", source ]
+        // An edit above an overload moves its line, and a renamed file no longer answers for it.
+        Assert.Equal<int>(lines, overloadsPickedAt (ValueSome(struct ("C:\\overloads.fs", -1))))
+        Assert.Equal<int>(lines, overloadsPickedAt (ValueSome(struct ("C:\\renamed.fs", lines[5]))))
+
+    [<Fact>]
+    let ``a context starts from the overload its mention was picked for`` () =
+        let lastOverload = Array.last (overloadsPickedAt ValueNone)
+
+        let context =
+            contextPickedIn cache overloadsSolution "Overloads.Counter.Bump" (ValueSome(struct ("C:\\overloads.fs", lastOverload)))
+
+        Assert.StartsWith("member _.Bump(step: byte)", context.Snippet.TrimStart(), StringComparison.Ordinal)
+        Assert.Equal(4, Seq.length context.SnippetLocations)
+
+    /// A line the picked file no longer declares the name on still leaves the file to go by.
+    [<Theory>]
+    [<InlineData("C:\\first.fs", 4)>]
+    [<InlineData("C:\\second.fs", 4)>]
+    [<InlineData("C:\\second.fs", 40)>]
+    let ``a mention goes to the file it was picked in when two files declare its name on one line`` (filePath: string, line: int) =
+        let declarations =
+            declarationsPickedIn cache twinsSolution "Twins.Twin.Value" (ValueSome(struct (filePath, line)))
+
+        Assert.Equal<string>([| filePath |], declarations |> Array.map fileOf)
+
+    /// A signature answers only when no implementation declares the name, wherever the mention was picked.
+    [<Fact>]
+    let ``a mention picked in a signature file goes to the implementation`` () =
+        let solution =
+            solutionOf
+                [
+                    "C:\\lib.fsi", "module Lib\n\nval twice: int -> int\n"
+                    "C:\\lib.fs", "module Lib\n\n\nlet twice x = x * 2\n"
+                ]
 
         let declarations =
-            CopilotSymbolQuery.declarationsOf cache Seq.empty solution "Overloads.Counter.Bump"
-            |> run
+            declarationsPickedIn (freshCache ()) solution "Lib.twice" (ValueSome(struct ("C:\\lib.fsi", 3)))
 
-        let lineOf index =
-            let struct (item: FSharp.Compiler.EditorServices.NavigableItem, _) =
-                declarations[index]
-
-            item.Range.StartLine
-
-        Assert.Equal(2, declarations.Length)
-
-        let firstLine, secondLine = lineOf 0, lineOf 1
-
-        let picked line =
-            CopilotSymbolQuery.declarationAt (ValueSome line) declarations
-            |> ValueOption.map (fun (struct (item, _)) -> item.Range.StartLine)
-
-        Assert.Equal(ValueSome firstLine, picked firstLine)
-        Assert.Equal(ValueSome secondLine, picked secondLine)
-
-        // An unknown line, or none at all, falls back to the first - the only choice before this line
-        // was tracked, and still the answer for a mention picked before this change shipped.
-        Assert.Equal(ValueSome firstLine, picked -1)
-
-        Assert.Equal(
-            ValueSome firstLine,
-            CopilotSymbolQuery.declarationAt ValueNone declarations
-            |> ValueOption.map (fun (struct (item, _)) -> item.Range.StartLine)
-        )
+        Assert.Equal<string>([| "C:\\lib.fs" |], declarations |> Array.map fileOf)
 
     [<Theory>]
     [<InlineData("Multiline.add", "/// Adds.", "x + y")>]
