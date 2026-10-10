@@ -100,8 +100,7 @@ type internal FSharpNavigableItemsCache
         }
 
     /// The entry for the file, from the parse every instance shares when it has no directives, otherwise from
-    /// the one parsed with this instance's defines. `matchesVersion` is false for the caller that takes the
-    /// last parse whatever version it came from.
+    /// the one parsed with this instance's defines.
     let tryCached (document: Document) matchesVersion =
         match document.FilePath with
         | null -> ValueNone
@@ -234,10 +233,12 @@ type internal FSharpNavigableItemsCache
                         return store document currentVersion true parseResults.ParseTree
         }
 
-    /// The items of the document's last parse, whatever version they came from. Reads no text, so a
-    /// closed document costs nothing; a caller that needs the items of the current text asks for them.
+    /// The items of the document's text, when its parse is cached and telling so reads no file: a closed
+    /// document knows its version once its text has been loaded, and one changed on disk has yet to load it.
     member _.TryGetCachedNavigableItems(document: Document) =
-        tryCached document (fun _ -> true) |> ValueOption.map _.Items
+        match document.TryGetTextVersion() with
+        | true, currentVersion -> tryCached document ((=) currentVersion) |> ValueOption.map _.Items
+        | _ -> ValueNone
 
     member _.CreateMatcherFor(searchPattern: string) =
         let patternMatcher =
