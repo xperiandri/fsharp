@@ -52,11 +52,11 @@ type internal FSharpNavigableItemsCache
                 return items
         }
 
-    /// The items of the document's last parse, whatever version they came from. Reads no text, so a
-    /// closed document costs nothing; a caller that needs the items of the current text asks for them.
-    member _.TryGetCachedNavigableItems(documentId: DocumentId) =
-        match cache.TryGetValue documentId with
-        | true, struct (_, items) -> ValueSome items
+    /// The items of the document's text, when its parse is cached and telling so reads no file: a closed
+    /// document knows its version once its text has been loaded, and one changed on disk has yet to load it.
+    member _.TryGetCachedNavigableItems(document: Document) =
+        match cache.TryGetValue document.Id, document.TryGetTextVersion() with
+        | (true, struct (version, items)), (true, currentVersion) when version = currentVersion -> ValueSome items
         | _ -> ValueNone
 
     member _.CreateMatcherFor(searchPattern: string) =

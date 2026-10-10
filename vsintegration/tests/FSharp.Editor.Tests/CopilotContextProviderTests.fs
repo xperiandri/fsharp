@@ -3,10 +3,12 @@
 namespace FSharp.Editor.Tests
 
 open System
+open System.Collections.Generic
 
 open Xunit
 
 open Microsoft.CodeAnalysis
+open Microsoft.CodeAnalysis.Text
 open Microsoft.VisualStudio.Copilot
 open Microsoft.VisualStudio.FSharp.Editor
 
@@ -222,7 +224,7 @@ let twice x = x * 2
 
         Assert.Equal(20, names.Length)
         Assert.All(names, fun name -> Assert.StartsWith("WidgetModule", name, StringComparison.Ordinal))
-        Assert.True((cache.TryGetCachedNavigableItems (documentNamed "cold.fs" solution).Id).IsNone)
+        Assert.True((cache.TryGetCachedNavigableItems(documentNamed "cold.fs" solution)).IsNone)
 
     [<Fact>]
     let ``the search stops once it has enough declarations`` () =
@@ -240,7 +242,57 @@ let twice x = x * 2
 
         Assert.NotEmpty(
             documentsOf solution
-            |> Array.filter (fun document -> (cache.TryGetCachedNavigableItems document.Id).IsNone)
+            |> Array.filter (fun document -> (cache.TryGetCachedNavigableItems document).IsNone)
+        )
+
+    /// Navigate To and other queries fill the same cache, so it can learn of a document between a
+    /// query's walk of the cached documents and its walk of the rest.
+    [<Theory>]
+    [<InlineData(false, false)>]
+    [<InlineData(true, false)>]
+    [<InlineData(false, true)>]
+    let ``an unopened document is visited once whenever the cache learns of it`` (cachedBefore: bool, cachedBetween: bool) =
+        let cache = freshCache ()
+        let solution = solutionOf [ coldFile ]
+        let document = documentNamed "cold.fs" solution
+
+        if cachedBefore then
+            cache.GetNavigableItems document |> run |> ignore
+
+        let struct (_, cached, cold) = CopilotSymbolQuery.tiers cache (HashSet()) solution
+        let answeredFromCache = Seq.length cached
+
+        if cachedBetween then
+            cache.GetNavigableItems document |> run |> ignore
+
+        Assert.Equal(1, answeredFromCache + Seq.length cold)
+
+    /// A file nobody has open still changes - on disk, or by closing its tab without saving - and what
+    /// was parsed of it before then names declarations and lines its text no longer has.
+    [<Fact>]
+    let ``a parse of an earlier text does not answer for a document`` () =
+        let cache = freshCache ()
+
+        let solution =
+            solutionOf
+                [
+                    "C:\\edited.fs", "module Edited\n\nlet before = 1\n\n\n\n\nlet removedLater = 2\n"
+                ]
+
+        let document = documentNamed "edited.fs" solution
+        cache.GetNavigableItems document |> run |> ignore
+
+        let edited = document.WithText(SourceText.From("module Edited\n\nlet after = 1\n"))
+        let solution = edited.Project.Solution
+
+        Assert.True((cache.TryGetCachedNavigableItems edited).IsNone)
+        Assert.Equal<string>([| "Edited.after" |], searchIn cache Seq.empty solution "after")
+        Assert.Empty(searchIn cache Seq.empty solution "removedLater")
+
+        Assert.True(
+            (CopilotSymbolQuery.symbolContext cache Seq.empty solution "Edited.removedLater"
+             |> run)
+                .IsNone
         )
 
     /// Focus outranks being open, which outranks the rest; a focused file that is no longer open counts
@@ -283,7 +335,7 @@ let twice x = x * 2
 
         Assert.Contains("WidgetModule.WidgetHolder", names)
         Assert.All(names, fun name -> Assert.StartsWith("WidgetModule", name, StringComparison.Ordinal))
-        Assert.True((cache.TryGetCachedNavigableItems (documentNamed "cold.fs" solution).Id).IsNone)
+        Assert.True((cache.TryGetCachedNavigableItems(documentNamed "cold.fs" solution)).IsNone)
 
     [<Theory>]
     [<InlineData("wi")>]

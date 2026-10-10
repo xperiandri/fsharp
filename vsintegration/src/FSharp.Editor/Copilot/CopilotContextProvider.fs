@@ -142,11 +142,11 @@ module internal CopilotSymbolQuery =
                     firstLine <= focus.LastLine && focus.FirstLine <= lastLine
         }
 
-    /// The documents in the order a query visits them: the ones the user has open, the ones already
-    /// parsed into the cache, and the ones that would have to be parsed to answer. Only the open ones
-    /// are resolved up front, by id rather than by walking the solution; the other two tiers are walked
+    /// The documents in the order a query visits them: the ones the user has open, the ones the cache
+    /// already answers for, and the rest, which have to be read and may have to be parsed. Only the open
+    /// ones are resolved up front, by id rather than by walking the solution; the other two tiers are walked
     /// when they are reached, so a query the open files already answer never looks at the rest.
-    let private tiers (cache: FSharpNavigableItemsCache) (openIds: HashSet<DocumentId>) (solution: Solution) =
+    let tiers (cache: FSharpNavigableItemsCache) (openIds: HashSet<DocumentId>) (solution: Solution) =
         let opened =
             openIds
             |> Seq.chooseV (fun id ->
@@ -163,18 +163,24 @@ module internal CopilotSymbolQuery =
                         document
             }
 
+        // Navigate To and other queries fill the same cache, also between the two walks: the cold tier is
+        // what the cached tier did not answer for, not what the cache still lacks by the time it is walked.
+        let answered = HashSet<DocumentId>()
+
         let cached =
             seq {
                 for document in unopened do
-                    match cache.TryGetCachedNavigableItems document.Id with
-                    | ValueSome items -> struct (document, items)
+                    match cache.TryGetCachedNavigableItems document with
+                    | ValueSome items ->
+                        answered.Add document.Id |> ignore
+                        struct (document, items)
                     | ValueNone -> ()
             }
 
         let cold =
             seq {
                 for document in unopened do
-                    if (cache.TryGetCachedNavigableItems document.Id).IsNone then
+                    if not (answered.Contains document.Id) then
                         document
             }
 
