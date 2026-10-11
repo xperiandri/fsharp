@@ -511,8 +511,12 @@ type public FSharpChecker =
     member internal FrameworkImportsCache: FrameworkImportsCache
     member internal ReferenceResolver: LegacyReferenceResolver
 
-    /// Answers a referenced assembly's last-write time to the incremental builders created after this call, in place of a
-    /// file system read per request. The value must be what `File.GetLastWriteTimeUtc` returns, kept current by the host.
+    /// Host entry point for the editor: answers the last-write time of a referenced assembly from the host's own
+    /// file-change tracking, so the incremental builder stops stat'ing every non-framework reference on every
+    /// request to decide whether a project's imports are stale. Call it before the first request; builders that
+    /// already exist keep reading the file system. The value must be what File.GetLastWriteTimeUtc would return,
+    /// kept current by the host's notifications; a notification the host misses leaves the build unaware of the
+    /// change until the host refreshes the stamp. Project references keep their logical stamps.
     member internal SetReferenceStampProvider: getReferenceStamp: (string -> DateTime) -> unit
 
     /// Tokenize a single line, returning token information and a tokenization state represented by an integer
