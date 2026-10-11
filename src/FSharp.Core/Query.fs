@@ -1650,7 +1650,14 @@ module Query =
                 if (IQueryableTySpec.IsAssignableFrom replNestedQuery.Type) && not (Type.op_Equality(IQueryableTySpec, replNestedQuery.Type)) then
                     Expr.Coerce (replNestedQuery, IQueryableTySpec)
                 else
-                    replNestedQuery
+                    // likewise over a sequence: a nested query that ends in a sort is an IOrderedEnumerable
+                    let IEnumerableTySpec = MakeIEnumerableTy tyArg
+                    if not (IQueryableTySpec.IsAssignableFrom replNestedQuery.Type)
+                       && IEnumerableTySpec.IsAssignableFrom replNestedQuery.Type
+                       && not (Type.op_Equality(IEnumerableTySpec, replNestedQuery.Type)) then
+                        Expr.Coerce (replNestedQuery, IEnumerableTySpec)
+                    else
+                        replNestedQuery
             replNestedQuery, MakeSeqConv conv
         | _ ->
             e, NoConv
@@ -1699,10 +1706,10 @@ module Query =
     /// in terms of LINQ operators, operating over mutable tuples. If necessary, also add a "postfix" in-memory transformation
     /// converting the data back to immutable tuples and records.
     let TransInnerWithFinalConsume canElim immutSource =
-        let mutSource, sourceConv = TransInnerAndCommit canElim true immutSource
+        let mutSource, sourceConv = TransInner canElim true immutSource
         match sourceConv with
         | NoConv ->
-            mutSource
+            CommitTransInnerResult mutSource
         | _ ->
             // This function is used with inputs of
             //     - QuerySource<_, _> (for operators like Min)
@@ -1713,14 +1720,18 @@ module Query =
                 assert immutSourceTy.IsGenericType
                 assert (IsQuerySourceTy immutSourceTy || IsIQueryableTy immutSourceTy || IsIEnumerableTy immutSourceTy)
                 immutSource.Type.GetGenericArguments().[0]
-            let immutVar = Var("after", immutSourceElemTy)
-            let mutVar, mutToImmutSelector = ConvertImmutableConsumerToMutableConsumer sourceConv (immutVar, Expr.Var immutVar)
             // Determine if we need to use IQueryable-preserving Select
             let mustReturnIQueryable =
                 IsQuerySourceTy immutSourceTy && qTyIsIQueryable (immutSourceTy.GetGenericArguments().[1]) ||
                 IsIQueryableTy immutSourceTy
+            match mutSource with
+            | TransInnerResult.Select(selectCanElim, isQTy, selectSource, selectVar, selectBody) when isQTy = mustReturnIQueryable ->
+                MakeSelect(selectCanElim, isQTy, CommitTransInnerResult selectSource, selectVar, ConvMutableToImmutable sourceConv selectBody)
+            | _ ->
+            let immutVar = Var("after", immutSourceElemTy)
+            let mutVar, mutToImmutSelector = ConvertImmutableConsumerToMutableConsumer sourceConv (immutVar, Expr.Var immutVar)
             // Use Queryable.Select when source should be IQueryable to preserve query composition
-            MakeSelect(CanEliminate.Yes, mustReturnIQueryable, mutSource, mutVar, mutToImmutSelector)
+            MakeSelect(CanEliminate.Yes, mustReturnIQueryable, CommitTransInnerResult mutSource, mutVar, mutToImmutSelector)
 
     /// Like TransInnerApplicativeAndCommit but (a) assumes the query is nested and (b) throws away the conversion information,
     /// i.e. assumes that the function "(fun immutConsumingVar -> immutConsumingExpr)" is the only consumption of the query.
