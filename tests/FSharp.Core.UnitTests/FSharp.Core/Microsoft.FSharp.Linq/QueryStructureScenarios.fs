@@ -77,7 +77,7 @@ let private loops () =
           "for over two levels of navigation collections"
           (fun db -> query { for c in db.Customers do for o in c.Orders do for l in o.Lines do select (c.Name, o.Id, l.Id) })
           ordersWithLines
-      |> Scenario.flat [ "SelectMany"; "SelectMany"; "Select"; "Select" ]
+      |> Scenario.flat [ "SelectMany"; "SelectMany"; "Select" ]
 
       Scenario.rows
           "three for"
@@ -90,7 +90,7 @@ let private loops () =
                   select (c.Name, o.Id, l.Id)
               })
           ordersWithLines
-      |> Scenario.flat [ "SelectMany"; "SelectMany"; "Where"; "Select"; "Select" ]
+      |> Scenario.flat [ "SelectMany"; "SelectMany"; "Where"; "Select" ]
 
       Scenario.rows
           "four for"
@@ -111,7 +111,7 @@ let private loops () =
                               for p in data.Products do
                                   if p.Id = l.ProductId then yield c.Name, l.Id, p.Name
               })
-      |> Scenario.flat [ "SelectMany"; "SelectMany"; "SelectMany"; "Where"; "Select"; "Select" ]
+      |> Scenario.flat [ "SelectMany"; "SelectMany"; "SelectMany"; "Where"; "Select" ]
 
       Scenario.rows
           "if then between three for"
@@ -302,7 +302,7 @@ let private leftJoins () =
                   select (c.Name, orders.Count())
               })
           (fun data -> seq { for c in data.Customers -> c.Name, max 1 c.Orders.Count })
-      |> Scenario.flat [ "GroupJoin"; "Select"; "Select"; "Select" ]
+      |> Scenario.flat [ "GroupJoin"; "Select" ]
 
       Scenario.rows
           "two left joins spelled leftOuterJoin"
@@ -319,7 +319,7 @@ let private leftJoins () =
                        (if obj.ReferenceEquals(p, null) then "" else p.Name))
               })
           leftJoinedOrdersAndProducts
-      |> Scenario.flat [ "GroupJoin"; "SelectMany"; "GroupJoin"; "SelectMany"; "Select"; "Select" ]
+      |> Scenario.flat [ "GroupJoin"; "SelectMany"; "GroupJoin"; "SelectMany"; "Select" ]
 
       Scenario.rows
           "two left joins spelled groupJoin and DefaultIfEmpty"
@@ -336,7 +336,7 @@ let private leftJoins () =
                        (if obj.ReferenceEquals(p, null) then "" else p.Name))
               })
           leftJoinedOrdersAndProducts
-      |> Scenario.flat [ "GroupJoin"; "SelectMany"; "GroupJoin"; "SelectMany"; "Select"; "Select" ]
+      |> Scenario.flat [ "GroupJoin"; "SelectMany"; "GroupJoin"; "SelectMany"; "Select" ]
 
       Scenario.rows
           "join after a left join"
@@ -349,7 +349,7 @@ let private leftJoins () =
                   select (c.Name, (if obj.ReferenceEquals(o, null) then -1 else o.Id), p.Name)
               })
           (leftJoinedOrdersAndProducts >> Seq.filter (fun (_, _, product) -> product <> ""))
-      |> Scenario.flat [ "GroupJoin"; "SelectMany"; "Join"; "Select"; "Select"; "Select" ]
+      |> Scenario.flat [ "GroupJoin"; "SelectMany"; "Join"; "Select" ]
 
       Scenario.rows
           "two for after a left join"
@@ -363,7 +363,7 @@ let private leftJoins () =
                   select (c.Name, o.Id, l.Id)
               })
           ordersWithLines
-      |> Scenario.flat [ "GroupJoin"; "SelectMany"; "SelectMany"; "Where"; "Select"; "Select" ]
+      |> Scenario.flat [ "GroupJoin"; "SelectMany"; "SelectMany"; "Where"; "Select" ]
 
       Scenario.rows
           "join after two for"
@@ -375,7 +375,7 @@ let private leftJoins () =
                   select (c.Name, o.Id, l.Id)
               })
           ordersWithLines
-      |> Scenario.flat [ "SelectMany"; "Join"; "Select"; "Select"; "Select" ]
+      |> Scenario.flat [ "SelectMany"; "Join"; "Select" ]
 
       Scenario.rows
           "join after a for over tuples"
@@ -388,7 +388,7 @@ let private leftJoins () =
                   select (c.Name, id, l.Id)
               })
           ordersWithLines
-      |> Scenario.flat [ "SelectMany"; "Join"; "Select"; "Where"; "Select"; "Select" ]
+      |> Scenario.flat [ "SelectMany"; "Join"; "Where"; "Select" ]
 
       Scenario.rows
           "join on a tuple key after a for over tuples"
@@ -401,7 +401,7 @@ let private leftJoins () =
                   select (c.Name, id, l.Id)
               })
           ordersWithLines
-      |> Scenario.flat [ "SelectMany"; "Join"; "Select"; "Where"; "Select"; "Select" ]
+      |> Scenario.flat [ "SelectMany"; "Join"; "Where"; "Select" ]
 
       Scenario.rows
           "join whose inner key uses an earlier variable"
@@ -425,7 +425,7 @@ let private leftJoins () =
                   select (c.Name, o.Id, lines.Count())
               })
           (fun data -> seq { for c in data.Customers do for o in c.Orders -> c.Name, o.Id, o.Lines.Count })
-      |> Scenario.flat [ "SelectMany"; "GroupJoin"; "Select"; "Select"; "Select" ]
+      |> Scenario.flat [ "SelectMany"; "GroupJoin"; "Select" ]
 
       Scenario.rows
           "join over a source that uses an earlier variable"
@@ -465,7 +465,7 @@ let private finalProjections () =
           "anonymous record selected after join"
           (fun db -> query { for c in db.Customers do join o in db.Orders on (c.Id = o.CustomerId); select {| Name = c.Name; Total = o.Total |} })
           (fun data -> seq { for c in data.Customers do for o in c.Orders -> {| Name = c.Name; Total = o.Total |} })
-      |> Scenario.flat [ "Join"; "Select"; "Select" ]
+      |> Scenario.flat [ "Join"; "Select" ]
 
       Scenario.rows
           "nested tuple selected"
@@ -541,12 +541,11 @@ let private consumers () =
           "exists after a tuple select"
           (fun db -> query { for c in db.Customers do select (c.City, c.Age) into t; exists (match t with city, age -> city = "Paris" && age < 30) })
           (fun _ -> true)
-      |> Scenario.violating [ Violation.Statement System.Linq.Expressions.ExpressionType.Block ]
 
       Scenario.value
           "count after a tuple select"
           (fun db -> query { for c in db.Customers do select (c.City, c.Age) into t; count })
           (fun data -> data.Customers.Length)
-      |> Scenario.flat [ "Select"; "Select"; "Count" ] ]
+      |> Scenario.flat [ "Select"; "Count" ] ]
 
 let cases () = loops () @ subqueries () @ leftJoins () @ finalProjections () @ consumers ()

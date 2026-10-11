@@ -999,6 +999,7 @@ module Query =
         | ExprShape.ShapeVar v2 -> if v = v2 then 1 else 0
         | ExprShape.ShapeLambda(_, body) -> countOccurrences v body
         | ExprShape.ShapeCombination(_, args) -> List.sumBy (countOccurrences v) args
+
     let (|CallFst|_|) = (|SpecificCallToMethod|_|) (methodhandleof (fun (x: int * int) -> fst x))
 
     let (|CallSnd|_|) = (|SpecificCallToMethod|_|) (methodhandleof (fun (x: int * int) -> snd x))
