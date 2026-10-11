@@ -443,7 +443,7 @@ module Query =
 
     /// Project F# function expressions to Linq LambdaExpression nodes
     let FuncExprToLinqFunc2Expression (srcTy, targetTy, v, body) =
-        FuncExprToDelegateExpr(srcTy, targetTy, v, body) |> QuotationToExpression
+        FuncExprToDelegateExpr(srcTy, targetTy, v, body) |> MakeImplicitExpressionConversion |> QuotationToExpression
 
     let FuncExprToLinqFunc2 (srcTy, targetTy, v, body) =
         FuncExprToDelegateExpr(srcTy, targetTy, v, body) |> EvaluateQuotation
@@ -986,6 +986,19 @@ module Query =
 
         | _ -> None
 
+    [<return: Struct>]
+    let rec (|NewRecordAfterLets|_|) (p: Expr) =
+        match p with
+        | Let(_, _, NewRecordAfterLets args) -> ValueSome args
+        | NewRecord(_, args) -> ValueSome args
+        | _ -> ValueNone
+
+    let rec countOccurrences (v: Var) (p: Expr) =
+        match p with
+        | ExprShape.ShapeVar v2 -> if v = v2 then 1 else 0
+        | ExprShape.ShapeLambda(_, body) -> countOccurrences v body
+        | ExprShape.ShapeCombination(_, args) -> List.sumBy (countOccurrences v) args
+
     let (|MacroReduction|_|) (p: Expr) =
 
         match p with
@@ -1042,6 +1055,26 @@ module Query =
             // Macro reduction - eliminate any 'let' in leaf expressions
             | MacroReduction reduced -> Some (walk reduced)
             | _ -> None)
+
+    /// The compiler evaluates record fields in the order they are written, and binds the ones written before
+    /// their place to variables: 'let v = e in ... NewRecord(..., v, ...)'. Without those lets the record reaches
+    /// ProduceMoreMutables as a record construction.
+    let rec InlineHoistedFields (p: Expr) =
+        match p with
+        | Let(v, e, (NewRecordAfterLets args as body))
+            when args |> List.exists (function Var arg -> arg = v | _ -> false) && countOccurrences v body = 1 ->
+            InlineHoistedFields (body.Substitute (fun v2 -> if v = v2 then Some e else None))
+        | QuoteTyped _
+        | QuoteRaw _ -> p
+        | ExprShape.ShapeCombination(_, []) -> p
+        | ExprShape.ShapeCombination(comb, args) -> ExprShape.RebuildShapeCombination(comb, List.map InlineHoistedFields args)
+        | ExprShape.ShapeLambda(v, body) -> Expr.Lambda(v, InlineHoistedFields body)
+        | ExprShape.ShapeVar _ -> p
+
+    /// A provider reads the fields of a record in any order, so what goes to one loses the lets that keep the
+    /// written order. What is evaluated in memory keeps them, and with them the order.
+    let ProduceMoreMutablesFor isIQ tipf expr =
+        ProduceMoreMutables tipf (if isIQ then InlineHoistedFields expr else expr)
 
     let (|CallQueryBuilderRunQueryable|_|) : Expr -> _ = (|SpecificCallToMethod|_|) (methodhandleof (fun (b :QueryBuilder, v) -> b.Run v))
 
@@ -1306,7 +1339,7 @@ module Query =
                 | CallQueryBuilderYield(_, _, immutSelectorBody) ->
 
                     let mutSelectorVar, mutSelectorBody = ConvertImmutableConsumerToMutableConsumer sourceConv (immutSelectorVar, MacroExpand immutSelectorBody)
-                    let mutSelectorBody, selectorConv = ProduceMoreMutables TransInnerNoCheck mutSelectorBody
+                    let mutSelectorBody, selectorConv = ProduceMoreMutablesFor (qTyIsIQueryable qTy) TransInnerNoCheck mutSelectorBody
                     let mutSelectorBody = CleanupLeaf mutSelectorBody
 
                     TransInnerResult.MakeSelect (canElim, qTyIsIQueryable qTy, mutSource, mutSelectorVar, mutSelectorBody), selectorConv
@@ -1367,7 +1400,7 @@ module Query =
         | CallSelect (_, [_; qTy; _], mutSource, Lambda(immutSelectorVar, immutSelectorBody)) ->
 
             let mutSource, _sourceConv, mutSelectorVar, mutSelectorBody = TransInnerApplicative check mutSource (immutSelectorVar, immutSelectorBody)
-            let mutSelectorBody, selectorConv = ProduceMoreMutables TransInnerNoCheck mutSelectorBody
+            let mutSelectorBody, selectorConv = ProduceMoreMutablesFor (qTyIsIQueryable qTy) TransInnerNoCheck mutSelectorBody
             let mutSelectorBody = CleanupLeaf mutSelectorBody
 
             TransInnerResult.MakeSelect(canElim, qTyIsIQueryable qTy, mutSource, mutSelectorVar, mutSelectorBody), selectorConv
@@ -1473,7 +1506,7 @@ module Query =
             let mutSource, sourceConv = TransInnerAndCommit CanEliminate.Yes check immutSource
             let mutVar2, mutKeySelector = ConvertImmutableConsumerToMutableConsumer sourceConv (immutVar2, MacroExpand immutKeySelector)
             let mutVar1, mutElementSelector = ConvertImmutableConsumerToMutableConsumer sourceConv (immutVar1, MacroExpand immutElementSelector)
-            let mutElementSelector, selectorConv = ProduceMoreMutables TransInnerNoCheck mutElementSelector
+            let mutElementSelector, selectorConv = ProduceMoreMutablesFor (qTyIsIQueryable qTy) TransInnerNoCheck mutElementSelector
             let mutElementSelector = CleanupLeaf mutElementSelector
             let conv =
                 match selectorConv with
@@ -1489,11 +1522,11 @@ module Query =
                      LambdasNoDetupling([immutOuterResultGroupVar; immutInnerResultKeyVar], immutElementSelector)]) ->
 
             let (mutOuterSource, outerSourceConv, mutInnerSource, innerSourceConv, mutOuterKeyVar: Var, mutOuterKeySelector, mutInnerKeyVar: Var, mutInnerKeySelector: Expr) =
-                TransJoinInputs check (immutOuterSource, immutInnerSource, immutOuterKeyVar, immutOuterKeySelector, immutInnerKeyVar, immutInnerKeySelector)
+                TransJoinInputs check (qTyIsIQueryable qTy) (immutOuterSource, immutInnerSource, immutOuterKeyVar, immutOuterKeySelector, immutInnerKeyVar, immutInnerKeySelector)
 
             let mutOuterResultVar, mutElementSelector = ConvertImmutableConsumerToMutableConsumer outerSourceConv (immutOuterResultGroupVar, MacroExpand immutElementSelector)
             let mutInnerResultKeyVar, mutElementSelector = ConvertImmutableConsumerToMutableConsumer innerSourceConv (immutInnerResultKeyVar, mutElementSelector)
-            let mutElementSelector, elementSelectorConv = ProduceMoreMutables TransInnerNoCheck mutElementSelector
+            let mutElementSelector, elementSelectorConv = ProduceMoreMutablesFor (qTyIsIQueryable qTy) TransInnerNoCheck mutElementSelector
             let mutElementSelector = CleanupLeaf mutElementSelector
 
             let joinExpr =
@@ -1513,12 +1546,12 @@ module Query =
                  LambdasNoDetupling([immutOuterResultGroupVar; immutInnerResultGroupVar], immutElementSelector)]) ->
 
             let (mutOuterSource, outerSourceConv, mutInnerSource, innerSourceConv, mutOuterKeyVar: Var, mutOuterKeySelector, mutInnerKeyVar: Var, mutInnerKeySelector: Expr) =
-                TransJoinInputs check (immutOuterSource, immutInnerSource, immutOuterKeyVar, immutOuterKeySelector, immutInnerKeyVar, immutInnerKeySelector)
+                TransJoinInputs check (qTyIsIQueryable qTy) (immutOuterSource, immutInnerSource, immutOuterKeyVar, immutOuterKeySelector, immutInnerKeyVar, immutInnerKeySelector)
 
             let mutOuterResultGroupVar, mutElementSelector = ConvertImmutableConsumerToMutableConsumer outerSourceConv (immutOuterResultGroupVar, MacroExpand immutElementSelector)
             let innerGroupConv = MakeSeqConv innerSourceConv
             let mutInnerResultKeyVar, mutElementSelector = ConvertImmutableConsumerToMutableConsumer innerGroupConv (immutInnerResultGroupVar, mutElementSelector)
-            let mutElementSelector, elementSelectorConv = ProduceMoreMutables TransInnerNoCheck mutElementSelector
+            let mutElementSelector, elementSelectorConv = ProduceMoreMutablesFor (qTyIsIQueryable qTy) TransInnerNoCheck mutElementSelector
             let mutElementSelector = CleanupLeaf mutElementSelector
 
             let joinExpr =
@@ -1542,11 +1575,11 @@ module Query =
             let immutElementSelector = immutElementSelector.Substitute (fun v -> if v = immutInnerResultGroupVar then Some (MakeDefaultIfEmpty ([immutInnerSourceTy], [Expr.Var immutInnerResultGroupVar])) else None)
 
             let (mutOuterSource, outerSourceConv, mutInnerSource, innerSourceConv, mutOuterKeyVar: Var, mutOuterKeySelector, mutInnerKeyVar: Var, mutInnerKeySelector: Expr) =
-                TransJoinInputs check (immutOuterSource, immutInnerSource, immutOuterKeyVar, immutOuterKeySelector, immutInnerKeyVar, immutInnerKeySelector)
+                TransJoinInputs check (qTyIsIQueryable qTy) (immutOuterSource, immutInnerSource, immutOuterKeyVar, immutOuterKeySelector, immutInnerKeyVar, immutInnerKeySelector)
 
             let mutOuterResultGroupVar, mutElementSelector = ConvertImmutableConsumerToMutableConsumer outerSourceConv (immutOuterResultGroupVar, MacroExpand immutElementSelector)
             let mutInnerResultKeyVar, mutElementSelector = ConvertImmutableConsumerToMutableConsumer innerSourceConv (immutInnerResultGroupVar, mutElementSelector)
-            let mutElementSelector, elementSelectorConv = ProduceMoreMutables TransInnerNoCheck mutElementSelector
+            let mutElementSelector, elementSelectorConv = ProduceMoreMutablesFor (qTyIsIQueryable qTy) TransInnerNoCheck mutElementSelector
             let mutElementSelector = CleanupLeaf mutElementSelector
 
             let joinExpr =
@@ -1638,7 +1671,7 @@ module Query =
         | _ ->
             e, NoConv
 
-    and TransJoinInputs check  (immutOuterSource, immutInnerSource, immutOuterKeyVar, immutOuterKeySelector, immutInnerKeyVar, immutInnerKeySelector) =
+    and TransJoinInputs check isIQ (immutOuterSource, immutInnerSource, immutOuterKeyVar, immutOuterKeySelector, immutInnerKeyVar, immutInnerKeySelector) =
 
         let mutOuterSource, outerSourceConv = TransInnerAndCommit CanEliminate.Yes check immutOuterSource
         let mutInnerSource, innerSourceConv = TransInnerAndCommit CanEliminate.Yes check immutInnerSource
@@ -1646,9 +1679,9 @@ module Query =
         let mutInnerKeyVar, mutInnerKeySelector = ConvertImmutableConsumerToMutableConsumer innerSourceConv (immutInnerKeyVar, MacroExpand immutInnerKeySelector)
 
         // Keys may be composite tuples - convert them to be mutables. Note, if there is a tuple on one side, there must be a tuple on the other side.
-        let mutOuterKeySelector, _ = ProduceMoreMutables TransNone mutOuterKeySelector
+        let mutOuterKeySelector, _ = ProduceMoreMutablesFor isIQ TransNone mutOuterKeySelector
         let mutOuterKeySelector = CleanupLeaf mutOuterKeySelector
-        let mutInnerKeySelector, _ = ProduceMoreMutables TransNone mutInnerKeySelector
+        let mutInnerKeySelector, _ = ProduceMoreMutablesFor isIQ TransNone mutInnerKeySelector
         let mutInnerKeySelector = CleanupLeaf mutInnerKeySelector
         mutOuterSource, outerSourceConv, mutInnerSource, innerSourceConv, mutOuterKeyVar, mutOuterKeySelector, mutInnerKeyVar, mutInnerKeySelector
 

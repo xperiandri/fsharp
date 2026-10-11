@@ -149,6 +149,34 @@ module ProviderShape =
             | "GroupJoin" -> true
             | _ -> false)
 
+    type private FreeParameterFinder() =
+        inherit ExpressionVisitor()
+
+        let bound = HashSet<ParameterExpression>(HashIdentity.Reference)
+
+        member val Found = false with get, set
+
+        override _.VisitLambda<'T>(node: Expression<'T>) =
+            let added = node.Parameters |> Seq.filter bound.Add |> Seq.toArray
+
+            try
+                base.VisitLambda node
+            finally
+                for parameter in added do
+                    bound.Remove parameter |> ignore
+
+        override this.VisitParameter node =
+            if not (bound.Contains node) then
+                this.Found <- true
+
+            node
+
+    /// A provider evaluates what reads no parameter of the tree before it translates, as it does a captured value.
+    let private readsParameter (node: Expression) =
+        let finder = FreeParameterFinder()
+        finder.Visit node |> ignore
+        finder.Found
+
     type private ShapeVisitor() =
         inherit ExpressionVisitor()
 
@@ -225,13 +253,17 @@ module ProviderShape =
             base.VisitNew node
 
         override this.VisitMethodCall node =
-            if node.Method.DeclaringType.Assembly = fsharpCore then
+            let inFSharpCore = node.Method.DeclaringType.Assembly = fsharpCore
+
+            if inFSharpCore && readsParameter node then
                 found.Add(Violation.RuntimeHelperCall $"{node.Method.DeclaringType.Name}.{node.Method.Name}")
 
             if collectionSelectorDepth > 0 && flattensOrJoins node then
                 found.Add(Violation.NestedInCollectionSelector node.Method.Name)
 
-            if isLinqOperator node && node.Method.Name = "SelectMany" then
+            if inFSharpCore && not (readsParameter node) then
+                node
+            elif isLinqOperator node && node.Method.Name = "SelectMany" then
                 this.Visit node.Object |> ignore
                 this.Visit node.Arguments.[0] |> ignore
                 collectionSelectorDepth <- collectionSelectorDepth + 1

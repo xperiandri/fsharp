@@ -3,9 +3,6 @@
 module FSharp.Core.UnitTests.Linq.QueryMethodSyntaxScenarios
 
 open System.Linq
-open System.Linq.Expressions
-
-let private block = [ Violation.Statement ExpressionType.Block ]
 
 let private reading typeName =
     [ Violation.ReadsUnnamedMember typeName ]
@@ -33,7 +30,6 @@ let cases () =
               let withLargeOrders = db.Orders.Where(fun o -> let total = o.Total in total > 4.0).Select(fun o -> o.CustomerId)
               db.Customers.Where(fun c -> withLargeOrders.Contains c.Id).Select(fun c -> c.Name))
           (customers >> Seq.filter (fun c -> c.Orders |> Seq.exists (fun o -> o.Total > 4.0)) >> Seq.map _.Name)
-      |> Scenario.violating block
 
       Scenario.rows
           "Select a record, fields in declaration order"
@@ -44,7 +40,6 @@ let cases () =
           "Select a record, fields out of declaration order"
           (fun db -> db.Customers.Select(fun c -> { PersonAge = c.Age; PersonName = c.Name }))
           (customers >> Seq.map (fun c -> { PersonName = c.Name; PersonAge = c.Age }))
-      |> Scenario.violating block
 
       Scenario.rows
           "Select an anonymous record, fields in alphabetical order"
@@ -55,25 +50,43 @@ let cases () =
           "Select an anonymous record, fields out of alphabetical order"
           (fun db -> db.Customers.Select(fun c -> {| Name = c.Name; Age = c.Age |}))
           (customers >> Seq.map (fun c -> {| Age = c.Age; Name = c.Name |}))
-      |> Scenario.violating block
+
+      Scenario.rows
+          "Select an anonymous record, method calls in fields out of order"
+          (fun db -> db.Customers.Select(fun c -> {| Upper = c.Name.ToUpper(); City = c.City.Trim() |}))
+          (customers >> Seq.map (fun c -> {| City = c.City.Trim(); Upper = c.Name.ToUpper() |}))
+
+      Scenario.rows
+          "Select a struct anonymous record, fields out of alphabetical order"
+          (fun db -> db.Customers.Select(fun c -> struct {| Name = c.Name; Age = c.Age |}))
+          (customers >> Seq.map (fun c -> struct {| Age = c.Age; Name = c.Name |}))
 
       Scenario.rows
           "Select with a let used twice"
           (fun db -> db.Customers.Select(fun c -> let upper = c.Name.ToUpper() in upper + upper))
           (customers >> Seq.map (fun c -> c.Name.ToUpper() + c.Name.ToUpper()))
-      |> Scenario.violating block
+
+      Scenario.rows
+          "Select with nested lets"
+          (fun db -> db.Customers.Select(fun c -> let age = c.Age in let next = age + 1 in next * 2))
+          (customers >> Seq.map (fun c -> (c.Age + 1) * 2))
+
+      Scenario.rows
+          "Select on a nullable property"
+          (fun db -> db.Customers.Select(fun c -> c.Registered.HasValue))
+          (customers >> Seq.map _.Registered.HasValue)
 
       Scenario.rows
           "Where taking a tuple apart"
           (fun db -> db.Customers.Select(fun c -> (c.Id, c.Name)).Where(fun (id, _) -> id > 1))
           (customers >> Seq.map (fun c -> c.Id, c.Name) >> Seq.filter (fun (id, _) -> id > 1))
-      |> Scenario.violating (reading "Tuple`2" @ block)
+      |> Scenario.violating (reading "Tuple`2")
 
       Scenario.rows
           "Where taking a struct tuple apart"
           (fun db -> db.Customers.Select(fun c -> struct (c.Id, c.Name)).Where(fun (struct (id, _)) -> id > 1))
           (customers >> Seq.map (fun c -> struct (c.Id, c.Name)) >> Seq.filter (fun (struct (id, _)) -> id > 1))
-      |> Scenario.violating (reading "ValueTuple`2" @ block)
+      |> Scenario.violating (reading "ValueTuple`2")
 
       Scenario.rows
           "Where taking the last of nine apart"
@@ -83,7 +96,7 @@ let cases () =
                   .Where(fun (_, _, _, _, _, _, _, _, last) -> last > 1)
                   .Select(fun (_, name, _, _, _, _, _, _, _) -> name))
           (customers >> Seq.filter (fun c -> c.Id > 1) >> Seq.map _.Name)
-      |> Scenario.violating (reading "Tuple`8" @ block)
+      |> Scenario.violating (reading "Tuple`8")
 
       Scenario.rows
           "Where taking the last of a struct nine apart"
@@ -93,27 +106,33 @@ let cases () =
                   .Where(fun (struct (_, _, _, _, _, _, _, _, last)) -> last > 1)
                   .Select(fun (struct (_, name, _, _, _, _, _, _, _)) -> name))
           (customers >> Seq.filter (fun c -> c.Id > 1) >> Seq.map _.Name)
-      |> Scenario.violating (reading "ValueTuple`8" @ block)
+      |> Scenario.violating (reading "ValueTuple`8")
 
       Scenario.rows
           "Where over a query that selects a tuple"
           (fun db -> (query { for c in db.Customers do select (c.Id, c.Name) }).Where(fun (id, _) -> id > 1))
           (customers >> Seq.map (fun c -> c.Id, c.Name) >> Seq.filter (fun (id, _) -> id > 1))
-      |> Scenario.violating (reading "Tuple`2" @ block)
+      |> Scenario.violating (reading "Tuple`2")
 
       Scenario.rows
           "Where on a nullable property"
           (fun db -> db.Customers.Where(fun c -> c.Registered.HasValue && c.Registered.Value.Year > 2020))
           (customers >> Seq.filter (fun c -> c.Registered.HasValue && c.Registered.Value.Year > 2020))
-      |> Scenario.violating block
 
       Scenario.rows
           "Where with a lambda over another source"
           (fun db -> db.Customers.Where(fun c -> db.Orders.Any(fun o -> o.CustomerId = c.Id)))
           (customers >> Seq.filter (fun c -> c.Orders.Count > 0))
-      |> Scenario.violating
-          [ Violation.RuntimeHelperCall "LeafExpressionConverter.QuotationToLambdaExpression"
-            Violation.RuntimeHelperCall "LeafExpressionConverter.SubstHelper" ]
+
+      Scenario.rows
+          "Select with a lambda over another source"
+          (fun db -> db.Customers.Select(fun c -> (c.Name, db.Orders.Where(fun o -> o.CustomerId = c.Id).Sum(fun o -> o.Total))))
+          (customers >> Seq.map (fun c -> c.Name, c.Orders |> Seq.sumBy _.Total))
+
+      Scenario.rows
+          "SelectMany with a lambda over another source"
+          (fun db -> db.Customers.SelectMany(fun c -> db.Orders.Where(fun o -> o.CustomerId = c.Id) :> seq<Order>).Select(fun o -> o.Id))
+          (fun data -> data.Orders |> Seq.map _.Id)
 
       Scenario.rows
           "OrderBy, ThenByDescending"
