@@ -149,6 +149,25 @@ module ProviderShape =
             | "GroupJoin" -> true
             | _ -> false)
 
+    type private ParameterOrLambdaFinder() =
+        inherit ExpressionVisitor()
+
+        member val Found = false with get, set
+
+        override this.VisitLambda<'T>(node: Expression<'T>) =
+            this.Found <- true
+            node
+
+        override this.VisitParameter node =
+            this.Found <- true
+            node
+
+    /// A provider computes what holds no parameter and no lambda before it translates, as it does a captured value.
+    let private isComputedByProvider (node: Expression) =
+        let finder = ParameterOrLambdaFinder()
+        finder.Visit node |> ignore
+        not finder.Found
+
     type private ShapeVisitor() =
         inherit ExpressionVisitor()
 
@@ -225,13 +244,27 @@ module ProviderShape =
             base.VisitNew node
 
         override this.VisitMethodCall node =
-            if node.Method.DeclaringType.Assembly = fsharpCore then
+            let inFSharpCore = node.Method.DeclaringType.Assembly = fsharpCore
+            let computed = inFSharpCore && isComputedByProvider node
+
+            if inFSharpCore && not computed then
                 found.Add(Violation.RuntimeHelperCall $"{node.Method.DeclaringType.Name}.{node.Method.Name}")
 
             if collectionSelectorDepth > 0 && flattensOrJoins node then
                 found.Add(Violation.NestedInCollectionSelector node.Method.Name)
 
-            if isLinqOperator node && node.Method.Name = "SelectMany" then
+            if computed then
+                // A lambda it gives is then part of what the provider translates
+                if typeof<Expression>.IsAssignableFrom node.Type then
+                    try
+                        match Expression.Lambda(node).Compile().DynamicInvoke() with
+                        | :? Expression as produced -> this.Visit produced |> ignore
+                        | _ -> ()
+                    with error ->
+                        found.Add(Violation.Throws(error.GetBaseException().GetType().Name))
+
+                node
+            elif isLinqOperator node && node.Method.Name = "SelectMany" then
                 this.Visit node.Object |> ignore
                 this.Visit node.Arguments.[0] |> ignore
                 collectionSelectorDepth <- collectionSelectorDepth + 1
