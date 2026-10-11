@@ -294,6 +294,17 @@ let private leftJoins () =
       |> Scenario.flat [ "GroupJoin"; "SelectMany"; "Select" ]
 
       Scenario.rows
+          "group of a leftOuterJoin counted"
+          (fun db ->
+              query {
+                  for c in db.Customers do
+                  leftOuterJoin o in db.Orders on (c.Id = o.CustomerId) into orders
+                  select (c.Name, orders.Count())
+              })
+          (fun data -> seq { for c in data.Customers -> c.Name, max 1 c.Orders.Count })
+      |> Scenario.flat [ "GroupJoin"; "Select"; "Select"; "Select" ]
+
+      Scenario.rows
           "two left joins spelled leftOuterJoin"
           (fun db ->
               query {
@@ -308,7 +319,7 @@ let private leftJoins () =
                        (if obj.ReferenceEquals(p, null) then "" else p.Name))
               })
           leftJoinedOrdersAndProducts
-      |> Scenario.violating (nested [ "GroupJoin"; "SelectMany" ])
+      |> Scenario.flat [ "GroupJoin"; "SelectMany"; "GroupJoin"; "SelectMany"; "Select"; "Select" ]
 
       Scenario.rows
           "two left joins spelled groupJoin and DefaultIfEmpty"
@@ -338,7 +349,7 @@ let private leftJoins () =
                   select (c.Name, (if obj.ReferenceEquals(o, null) then -1 else o.Id), p.Name)
               })
           (leftJoinedOrdersAndProducts >> Seq.filter (fun (_, _, product) -> product <> ""))
-      |> Scenario.violating (nested [ "Join" ])
+      |> Scenario.flat [ "GroupJoin"; "SelectMany"; "Join"; "Select"; "Select"; "Select" ]
 
       Scenario.rows
           "two for after a left join"
@@ -352,7 +363,7 @@ let private leftJoins () =
                   select (c.Name, o.Id, l.Id)
               })
           ordersWithLines
-      |> Scenario.violating (nested [ "SelectMany" ])
+      |> Scenario.flat [ "GroupJoin"; "SelectMany"; "SelectMany"; "Where"; "Select"; "Select" ]
 
       Scenario.rows
           "join after two for"
