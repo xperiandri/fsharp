@@ -260,10 +260,9 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
             | true, cacheEntry -> disposeSingleFileCacheEntry cacheEntry
             | _ -> ()
 
-    // Each project's '-r:' set is watched for the reference stamps the snapshot-reuse guard reads, and
-    // only while that guard runs (transparent compiler with snapshot reuse). Roslyn watches only
-    // MetadataReferences and invalidates those itself by bumping Project.Version; a project
-    // reference's output dll is a ProjectReference to Roslyn and is watched only here.
+    // Each project's '-r:' set is watched for the reference stamps its snapshots and its incremental builder
+    // read. Roslyn watches only MetadataReferences and invalidates those itself by bumping Project.Version;
+    // a project reference's output dll is a ProjectReference to Roslyn and is watched only here.
     let referenceChangeTracker = new FSharpReferenceChangeTracker(fileChangeWatcher)
     let referenceStamps = referenceChangeTracker :> IReferenceStamps
 
@@ -662,14 +661,7 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
                                     epoch,
                                     fun () ->
                                         cache.[projectId] <- struct (project, parsingOptions, projectOptions)
-
-                                        if
-                                            checker.UsesTransparentCompiler
-                                            && project.IsTransparentCompilerSnapshotReuseEnabled
-                                        then
-                                            watchReferenceFilesNoLock projectId projectOptions
-                                        else
-                                            clearReferenceWatchesNoLock projectId
+                                        watchReferenceFilesNoLock projectId projectOptions
                                 )
 
                             if published then

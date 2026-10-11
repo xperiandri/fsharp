@@ -271,9 +271,11 @@ module private CheckerExtensions =
                     }
         ]
 
+    let referenceStampsOf (project: Project) =
+        project.Solution.GetFSharpWorkspaceService().FSharpProjectOptionsManager.ReferenceStamps
+
     let referencesOnDiskChanged (project: Project) (oldSnapshot: FSharpProjectSnapshot) options =
-        let stamps =
-            project.Solution.GetFSharpWorkspaceService().FSharpProjectOptionsManager.ReferenceStamps
+        let stamps = referenceStampsOf project
 
         ReferenceStamps.changed stamps (getOnDiskReferences stamps options) oldSnapshot.ProjectSnapshot.ReferencesOnDisk
 
@@ -402,7 +404,12 @@ module private CheckerExtensions =
                             }
 
                         let! snapshot =
-                            FSharpProjectSnapshot.FromOptions(options, getFileSnapshot, ?snapshotAccumulator = snapshotAccumulatorOpt)
+                            FSharpProjectSnapshot.FromOptionsWithReferenceStamps(
+                                options,
+                                getFileSnapshot,
+                                (referenceStampsOf project).GetLastWriteTimeUtc,
+                                ?snapshotAccumulator = snapshotAccumulatorOpt
+                            )
 
                         System.Diagnostics.Trace.TraceInformation $"Created new FSharpProjectSnapshot ({snapshot.Label})"
 
