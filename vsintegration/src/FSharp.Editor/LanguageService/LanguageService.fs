@@ -225,6 +225,9 @@ type internal FSharpWorkspaceServiceFactory
             let optionsManager =
                 FSharpProjectOptionsManager(checker, workspace, fileChangeWatcher)
 
+            // The incremental builder asks the tracker for a reference's stamp instead of stat'ing it on every request.
+            checker.SetReferenceStampProvider(optionsManager.ReferenceStamps.GetLastWriteTimeUtc)
+
             // The snapshot caches hold the Roslyn project, and through it the solution, of every snapshot they keep.
             workspace.WorkspaceChanged.Add(fun args ->
                 match args.Kind with

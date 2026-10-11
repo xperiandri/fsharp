@@ -66,9 +66,6 @@ the reference watches — goes through one `PublicationGate`. Closing the soluti
 and clears the caches in the same critical section, so a computation that started before the close
 finds the epoch moved and publishes nothing.
 
-Still to come:
-
-1. `FSharpProjectSnapshot.FromOptionsWithReferenceStamps` (dotnet/fsharp#20459) lets the snapshot
-   built from scratch read the same stamps.
-2. A host-supplied stamp provider for the incremental builder, so `IsReferencesInvalidated` reads
-   the same stamps instead of stat'ing every reference per request.
+A snapshot built from scratch (`FSharpProjectSnapshot.FromOptionsWithReferenceStamps`) and the
+incremental builder (`FSharpChecker.SetReferenceStampProvider`) read the same stamps, so neither
+stats a watched reference per request.
