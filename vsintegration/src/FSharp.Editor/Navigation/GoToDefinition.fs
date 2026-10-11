@@ -450,7 +450,7 @@ type internal GoToDefinition(metadataAsSource: FSharpMetadataAsSourceService) =
 
                 match declarations with
                 | FindDeclResult.DeclFound sigRange ->
-                    match originDocument.TryGetSolutionDocumentFromFSharpRange sigRange with
+                    match originDocument.TryGetSolutionDocumentFromFSharpRange(sigRange, targetSymbolUse.Symbol.Assembly.SimpleName) with
                     | ValueNone -> return ValueNone
                     | ValueSome sigDocument -> return! navigableItemAt sigDocument sigRange
                 | _ -> return ValueNone
@@ -523,11 +523,27 @@ type internal GoToDefinition(metadataAsSource: FSharpMetadataAsSourceService) =
                             return ValueSome(FSharpGoToDefinitionResult.ExternalAssembly(targetSymbolUse, metadataReferences), idRange)
 
                     | FindDeclResult.DeclFound targetRange ->
-                        match originDocument.TryGetSolutionDocumentFromFSharpRange targetRange with
+                        let externalDeclaration =
+                            let metadataReferences = originDocument.Project.MetadataReferences
+                            ValueSome(FSharpGoToDefinitionResult.ExternalAssembly(targetSymbolUse, metadataReferences), idRange)
+
+                        // A declaration with a mapped name was external before such a name reached a document,
+                        // and stays so wherever the source it reaches gives no location for it.
+                        let withoutLocation =
+                            if isRootedPath targetRange.FileName then
+                                ValueNone
+                            else
+                                externalDeclaration
+
+                        // A build that maps its source paths leaves the name relative, so it is matched against the
+                        // solution's own paths - and only those of the projects compiling the symbol's assembly: an
+                        // unrelated file can end the same way.
+                        match
+                            originDocument.TryGetSolutionDocumentFromFSharpRange(targetRange, targetSymbolUse.Symbol.Assembly.SimpleName)
+                        with
                         | ValueNone ->
                             // No document for the file anywhere in the workspace: the symbol comes from an assembly.
-                            let metadataReferences = originDocument.Project.MetadataReferences
-                            return ValueSome(FSharpGoToDefinitionResult.ExternalAssembly(targetSymbolUse, metadataReferences), idRange)
+                            return externalDeclaration
                         | ValueSome targetDocument when lexerSymbol.Range = targetRange ->
                             let! navItem =
                                 if counterpartAtCaret then
@@ -562,9 +578,9 @@ type internal GoToDefinition(metadataAsSource: FSharpMetadataAsSourceService) =
                                     | ValueNone -> CancellableTask.singleton ValueNone
                                     | ValueSome implDocument -> this.FindNavigableDeclarationIn(targetSymbolUse, implDocument)
 
-                            return
-                                navItem
-                                |> ValueOption.map (fun navItem -> FSharpGoToDefinitionResult.NavigableItem navItem, idRange)
+                            match navItem with
+                            | ValueSome navItem -> return ValueSome(FSharpGoToDefinitionResult.NavigableItem navItem, idRange)
+                            | ValueNone -> return withoutLocation
                     | _ -> return ValueNone
         }
 
