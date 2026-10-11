@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation.  All Rights Reserved.  See License.txt in the project root for license information.
 
+// The file system shim and the incremental builder's event log are global shared resources.
 [<Xunit.Collection(nameof FSharp.Test.NotThreadSafeResourceCollection)>]
 module FSharp.Compiler.Service.Tests.ReferenceStampProviderTests
 
@@ -14,6 +15,8 @@ open FSharp.Compiler.IO
 open FSharp.Compiler.Service.Tests.Common
 open Xunit
 
+/// `Main.fs` referencing a `Lib.dll` compiled into the same temp directory: a non-framework reference whose
+/// stamp the incremental builder has to track between requests.
 type private Fixture =
     {
         LibDll: string
@@ -76,12 +79,9 @@ let private recording () =
     let seen = ConcurrentDictionary<string, int>(StringComparer.OrdinalIgnoreCase)
     seen, (fun (path: string) -> seen.AddOrUpdate(path, 1, (fun _ count -> count + 1)) |> ignore)
 
-let private legacyChecker () =
-    FSharpChecker.Create(useTransparentCompiler = false)
-
 [<Fact>]
 let ``The builder asks the provider for reference stamps instead of the file system`` () : Task =
-    let checker = legacyChecker ()
+    let checker = FSharpChecker.Create(useTransparentCompiler = false)
 
     withFixture checker (fun fixture ->
         task {
@@ -101,6 +101,7 @@ let ``The builder asks the provider for reference stamps instead of the file sys
                     recordAsk path
                     File.GetLastWriteTimeUtc path)
 
+                // Creating the builder reads the dll to import it; every request after that is what matters.
                 let! _ = checker.ParseAndCheckProject fixture.Options
                 statted.Clear()
                 asked.Clear()
@@ -115,7 +116,7 @@ let ``The builder asks the provider for reference stamps instead of the file sys
 
 [<Fact>]
 let ``A newer host stamp recreates the builder and a newer file alone does not`` () : Task =
-    let checker = legacyChecker ()
+    let checker = FSharpChecker.Create(useTransparentCompiler = false)
 
     withFixture checker (fun fixture ->
         task {
@@ -131,34 +132,31 @@ let ``A newer host stamp recreates the builder and a newer file alone does not``
                 |> List.filter ((=) IncrementalBuilderEventTesting.IBECreated)
                 |> List.length
 
-            let touchLibDll () =
-                File.SetLastWriteTimeUtc(fixture.LibDll, File.GetLastWriteTimeUtc fixture.LibDll + TimeSpan.FromSeconds 2.)
-
-            let tellProviderOfLibDll () =
-                stamps[fixture.LibDll] <- File.GetLastWriteTimeUtc fixture.LibDll
-
             let! _ = checker.ParseAndCheckProject fixture.Options
             Assert.Equal(1, buildersCreated ())
 
-            touchLibDll ()
+            // The file is newer, but the host has not said so.
+            File.SetLastWriteTimeUtc(fixture.LibDll, File.GetLastWriteTimeUtc fixture.LibDll + TimeSpan.FromSeconds 2.)
             let! _ = checker.ParseAndCheckProject fixture.Options
             Assert.Equal(1, buildersCreated ())
 
-            tellProviderOfLibDll ()
+            stamps[fixture.LibDll] <- File.GetLastWriteTimeUtc fixture.LibDll
             let! _ = checker.ParseAndCheckProject fixture.Options
             Assert.Equal(2, buildersCreated ())
 
+            // The recreated builder stamped through the same source, so nothing is stale any more.
             let! _ = checker.ParseAndCheckProject fixture.Options
             Assert.Equal(2, buildersCreated ())
         })
 
 [<Fact>]
-let ``A project reference keeps its logical stamp whatever the provider answers`` () : Task =
-    let checker = legacyChecker ()
+let ``Project references keep their logical stamps`` () : Task =
+    let checker = FSharpChecker.Create(useTransparentCompiler = false)
 
     withFixture checker (fun fixture ->
         task {
-            let optionsWithLibAsProject =
+            // Lib is also an in-memory project reference; the provider knows nothing about any file.
+            let options =
                 { fixture.Options with
                     ReferencedProjects = [| FSharpReferencedProject.FSharpReference(fixture.LibDll, fixture.LibOptions) |]
                 }
@@ -171,23 +169,23 @@ let ``A project reference keeps its logical stamp whatever the provider answers`
                 if String.Equals(fileName, fixture.MainFs, StringComparison.OrdinalIgnoreCase) then
                     Interlocked.Increment &mainChecks.contents |> ignore)
 
-            for _ in 1..2 do
-                let! _ = checker.ParseAndCheckProject optionsWithLibAsProject
-                ()
+            // The second request lets Main's builder see Lib's build, which did not exist when Main was first stamped.
+            let! _ = checker.ParseAndCheckProject options
+            let! _ = checker.ParseAndCheckProject options
+            let before = mainChecks.Value
 
-            let mainChecksBeforeLibChange = mainChecks.Value
-
+            // Lib's source moves its logical stamp, which Main reads from the referenced build, not from the provider.
             File.WriteAllText(fixture.LibFs, "module Lib\nlet answer = 43\n")
             File.SetLastWriteTimeUtc(fixture.LibFs, DateTime.UtcNow.AddSeconds 2.)
-            let! _ = checker.ParseAndCheckProject optionsWithLibAsProject
+            let! _ = checker.ParseAndCheckProject options
 
-            Assert.Equal(mainChecksBeforeLibChange + 1, mainChecks.Value)
+            Assert.Equal(before + 1, mainChecks.Value)
         })
 
-#nowarn "57"
+#nowarn "57" // NotifyFileChanged is experimental
 
 [<Fact>]
-let ``The legacy builder the transparent compiler creates for NotifyFileChanged gets the provider`` () : Task =
+let ``The transparent compiler hands the provider to the builders it still creates`` () : Task =
     let checker = FSharpChecker.Create(useTransparentCompiler = true)
 
     withFixture checker (fun fixture ->
@@ -198,6 +196,7 @@ let ``The legacy builder the transparent compiler creates for NotifyFileChanged 
                 recordAsk path
                 File.GetLastWriteTimeUtc path)
 
+            // NotifyFileChanged is the one request the transparent compiler still routes to a legacy builder.
             do! checker.NotifyFileChanged(fixture.MainFs, fixture.Options)
 
             Assert.True(asked.ContainsKey fixture.LibDll)
