@@ -31,10 +31,6 @@ let private ordersWithLines (data: Data) =
 let private customersWithOrders (data: Data) =
     seq { for c in data.Customers do for o in c.Orders -> c.Name, o.Id }
 
-let private absWithItsWitness =
-    [ Violation.RuntimeHelperCall "Operators.Abs$W"
-      Violation.RuntimeHelperCall "FuncConvert.ToFSharpFunc"
-      Violation.RuntimeHelperCall "Operators.Abs" ]
 
 let private leftJoinedOrders (data: Data) =
     seq { for c in data.Customers do for o in orDefault c.Orders -> c.Name, idOrNone o }
@@ -231,13 +227,11 @@ let private subqueries () =
           "where with abs of a constant"
           (fun db -> query { for c in db.Customers do where (c.Age > abs (-27)); select c.Name })
           (fun data -> seq { for c in data.Customers do if c.Age > 27 then yield c.Name })
-      |> Scenario.violating absWithItsWitness
 
       Scenario.rows
           "where with a lambda that reads nothing of the query and calls abs"
           (fun db -> query { for c in db.Customers do where (c.Age > 26 && db.Orders.Any(fun o -> abs (o.Total - 10.0) < 6.0)); select c.Name })
-          (fun data -> seq { for c in data.Customers do if c.Age > 26 && data.Orders |> Seq.exists (fun o -> abs (o.Total - 10.0) < 6.0) then yield c.Name })
-      |> Scenario.violating absWithItsWitness ]
+          (fun data -> seq { for c in data.Customers do if c.Age > 26 && data.Orders |> Seq.exists (fun o -> abs (o.Total - 10.0) < 6.0) then yield c.Name }) ]
 
 let private leftJoins () =
     [ Scenario.rows
@@ -337,7 +331,7 @@ let private finalProjections () =
           "anonymous record selected after join"
           (fun db -> query { for c in db.Customers do join o in db.Orders on (c.Id = o.CustomerId); select {| Name = c.Name; Total = o.Total |} })
           (fun data -> seq { for c in data.Customers do for o in c.Orders -> {| Name = c.Name; Total = o.Total |} })
-      |> Scenario.flat [ "Join"; "Select"; "Select" ]
+      |> Scenario.flat [ "Join"; "Select" ]
 
       Scenario.rows
           "nested tuple selected"
@@ -413,12 +407,11 @@ let private consumers () =
           "exists after a tuple select"
           (fun db -> query { for c in db.Customers do select (c.City, c.Age) into t; exists (match t with city, age -> city = "Paris" && age < 30) })
           (fun _ -> true)
-      |> Scenario.violating [ Violation.Statement System.Linq.Expressions.ExpressionType.Block ]
 
       Scenario.value
           "count after a tuple select"
           (fun db -> query { for c in db.Customers do select (c.City, c.Age) into t; count })
           (fun data -> data.Customers.Length)
-      |> Scenario.flat [ "Select"; "Select"; "Count" ] ]
+      |> Scenario.flat [ "Select"; "Count" ] ]
 
 let cases () = loops () @ subqueries () @ leftJoins () @ finalProjections () @ consumers ()
