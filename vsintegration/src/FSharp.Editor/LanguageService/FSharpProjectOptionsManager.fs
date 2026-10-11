@@ -676,6 +676,16 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
                 let! isInvalidated = isProjectInvalidated oldProject project
 
                 if isInvalidated then
+                    // Roslyn is the source of truth for a swapped MetadataReference: the path stays and the
+                    // file behind it changed, so a notification this tracker missed must not keep its stamp.
+                    for reference in project.GetChanges(oldProject).GetAddedMetadataReferences() do
+                        match reference with
+                        | :? PortableExecutableReference as peReference ->
+                            match peReference.FilePath with
+                            | null -> ()
+                            | path -> referenceStamps.Invalidate path
+                        | _ -> ()
+
                     cache.TryRemove(projectId) |> ignore
                     return! tryComputeOptions project
                 else
