@@ -3,9 +3,11 @@
 namespace FSharp.Editor.Tests
 
 open Xunit
+open System.Collections.Concurrent
 open System.Collections.Immutable
 open System.Diagnostics
 open System.Threading
+open System.Threading.Tasks
 open Microsoft.CodeAnalysis
 open Microsoft.CodeAnalysis.Text
 open Microsoft.VisualStudio.FSharp.Editor
@@ -108,6 +110,67 @@ module HeyHo =
     [<Fact>]
     let ``a backticked identifier highlights the matched substring`` () =
         Assert.Equal<string list>([ "few" ], matchedTextOf "few" "a few words")
+
+    /// Hands a document's text over once the task `onLoad` returns for its path is done.
+    type private GatedTextLoader(path: string, source: string, onLoad: string -> Task) =
+        inherit TextLoader()
+
+        override _.LoadTextAndVersionAsync(_: LoadTextOptions, _: CancellationToken) =
+            task {
+                do! onLoad path
+                return TextAndVersion.Create(SourceText.From source, VersionStamp.Create(), path)
+            }
+
+    /// The priority document hands its text over only once the other one has been asked for its own, so the
+    /// search ends only if the rest of the project is reached while a priority document is still being read.
+    [<Fact>]
+    let ``a project's priority documents are reached first and do not hold back the rest`` () =
+        let first = "C:\\First.fs"
+        let second = "C:\\Second.fs"
+        let reached = ConcurrentQueue<string>()
+
+        let firstReached =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let onLoad path : Task =
+            reached.Enqueue path
+
+            if path = first then
+                firstReached.TrySetResult() |> ignore
+
+            firstReached.Task
+
+        let projectId = ProjectId.CreateNewId()
+
+        let documentOf path source =
+            DocumentInfo.Create(DocumentId.CreateNewId projectId, path, loader = GatedTextLoader(path, source, onLoad), filePath = path)
+
+        let solution =
+            [
+                documentOf first "module First\n\nlet shared = 1\n"
+                documentOf second "module Second\n\nlet shared = 2\n"
+            ]
+            |> RoslynTestHelpers.CreateProjectInfo projectId "C:\\test.fsproj"
+            |> List.singleton
+            |> RoslynTestHelpers.CreateSolution
+
+        { RoslynTestHelpers.DefaultProjectOptions with
+            SourceFiles = [| first; second |]
+        }
+        |> RoslynTestHelpers.SetProjectOptions projectId solution
+
+        let project = solution.GetProject projectId
+
+        let priority =
+            project.Documents |> Seq.find (fun document -> document.FilePath = second)
+
+        let service: IFSharpNavigateToSearchService = provider.GetExportedValue()
+
+        let search =
+            service.SearchProjectAsync(project, ImmutableArray.Create priority, "shared", service.KindsProvided, CancellationToken.None)
+
+        Assert.True(search.Wait(System.TimeSpan.FromMinutes 1.0), "The rest of the project waited for the priority document.")
+        Assert.Equal(second, reached |> Seq.head)
 
     /// A standalone script has its options kept per document, so its project never has any to key the script's
     /// parse by. A parse that depends on the defines is kept under the document itself instead.
