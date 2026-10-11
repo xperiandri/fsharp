@@ -66,6 +66,11 @@ type internal FSharpNavigableItemsCache
     /// seen set with `NavigateToSearchResultComparer`, which collapses results by file path and span.
     let cache = ConcurrentDictionary<NavigableItemsKey, NavigableItemsEntry>()
 
+    /// The parses of documents whose options are kept per document rather than per project - a standalone
+    /// script, a file outside any project - and so name no key in `cache` they can read back. Each is kept
+    /// under its own document and answers for nothing else.
+    let documentCache = ConcurrentDictionary<DocumentId, NavigableItemsEntry>()
+
     /// The key for a parse that does not depend on the defines. Not a define set any instance can have,
     /// since defines are identifiers — an instance with none of its own must not read this entry as its own.
     [<Literal>]
@@ -82,7 +87,8 @@ type internal FSharpNavigableItemsCache
         | workspace ->
             workspace.WorkspaceChanged.Add(fun e ->
                 if e.NewSolution.Id <> e.OldSolution.Id then
-                    cache.Clear())
+                    cache.Clear()
+                    documentCache.Clear())
 
     let dependsOnDefines (parseTree: ParsedInput) =
         match parseTree with
@@ -102,8 +108,13 @@ type internal FSharpNavigableItemsCache
     /// The entry for the file, from the parse every instance shares when it has no directives, otherwise from
     /// the one parsed with this instance's defines.
     let tryCached (document: Document) matchesVersion =
+        let ownDocument () =
+            match documentCache.TryGetValue document.Id with
+            | true, entry when matchesVersion entry.Version -> ValueSome entry
+            | _ -> ValueNone
+
         match document.FilePath with
-        | null -> ValueNone
+        | null -> ownDocument ()
         | path ->
             let entry defines =
                 match cache.TryGetValue(keyOf document defines path) with
@@ -116,7 +127,7 @@ type internal FSharpNavigableItemsCache
             let ownParse =
                 match document.TryGetFSharpParsingOptionsData() with
                 | ValueSome _ -> entry (definesOf document)
-                | ValueNone -> ValueNone
+                | ValueNone -> ownDocument ()
 
             match entry AnyDefines with
             | ValueSome found -> ValueSome found
@@ -154,6 +165,17 @@ type internal FSharpNavigableItemsCache
         remember document defines version approximate items
         items
 
+    /// A project's first parse is what makes it produce its options, and the next search keys the document by
+    /// them: only a document that still has none is kept under its own id.
+    let rememberOwn (document: Document) version items =
+        if document.TryGetFSharpParsingOptionsData().IsNone then
+            documentCache[document.Id] <-
+                {
+                    Version = version
+                    Approximate = false
+                    Items = items
+                }
+
     /// Storage keeps one entry per document, under the checksum of the text alone when its tree holds no conditional
     /// directives and of the text and the defines when it does — as the memory entry is kept under `AnyDefines` or
     /// the defines — so a read tries one checksum, then the other.
@@ -188,11 +210,14 @@ type internal FSharpNavigableItemsCache
                         NavigableItemsIndex.textAndDefinesChecksum textChecksum defines
 
                     match! tryRestore document defines currentVersion false definesChecksum with
-                    | ValueSome items -> return items
+                    | ValueSome items ->
+                        rememberOwn document currentVersion items
+                        return items
                     | ValueNone ->
                         let! parseResults = document.GetFSharpParseResultsAsync(nameof (FSharpNavigableItemsCache))
                         let parseTree = parseResults.ParseTree
                         let items = store document currentVersion false parseTree
+                        rememberOwn document currentVersion items
 
                         let checksum =
                             if dependsOnDefines parseTree then
