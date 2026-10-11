@@ -78,14 +78,20 @@ module FSharpFindUsagesService =
         }
 
     // File can be included in more than one project, hence single `range` may results with multiple `Document`s.
-    let rangeToDocumentSpans (document: Document, range: range, symbolName: string) =
+    let rangeToDocumentSpans (document: Document, range: range, symbolName: string, declaringAssembly: string) =
         if range.Start = range.End then
             CancellableTask.singleton [||]
         else
             cancellableTask {
+                // A name a path map left relative reaches no document through the workspace's index of the
+                // paths on disk, so a declaration imported from such an assembly is matched by its tail, in the
+                // projects that compile the assembly.
+                let documents =
+                    document.GetSolutionDocumentsWithFilePath(range.FileName, declaringAssembly)
+
                 let! spans =
                     seq {
-                        for doc in document.GetSolutionDocumentsWithFilePath range.FileName do
+                        for doc in documents do
                             cancellableTask {
                                 let! cancellationToken = CancellableTask.getCancellationToken ()
                                 let! sourceText = doc.GetTextAsync(cancellationToken)
@@ -231,7 +237,7 @@ module FSharpFindUsagesService =
 
             let! declarationSpans =
                 match declarationRange with
-                | ValueSome range -> rangeToDocumentSpans (document, range, symbol.Ident.idText)
+                | ValueSome range -> rangeToDocumentSpans (document, range, symbol.Ident.idText, symbolUse.Symbol.Assembly.SimpleName)
                 | ValueNone -> CancellableTask.singleton [||]
 
             let declarationSpans =

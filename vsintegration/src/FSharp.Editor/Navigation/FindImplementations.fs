@@ -94,7 +94,9 @@ let private declaringProjects (symbol: FSharpSymbol) (solution: Solution) =
     let inSolution =
         symbol.ImplementationLocation
         |> Option.orElse symbol.DeclarationLocation
-        |> Option.map (fun range -> solution.GetDocumentIdsWithFSharpFileName range.FileName |> List.map _.ProjectId)
+        |> Option.map (fun range ->
+            solution.GetDocumentIdsWithFSharpFileName(range.FileName, symbol.Assembly.SimpleName)
+            |> List.map _.ProjectId)
         |> Option.defaultValue []
 
     match inSolution, symbol.Assembly.FileName with
@@ -300,7 +302,7 @@ let private findMemberImplementations
                 declaringEntity.ImplementationLocation
                 |> Option.defaultValue declaringEntity.DeclarationLocation
 
-            match solution.TryGetDocumentFromFSharpRange declaration with
+            match solution.TryGetDocumentFromFSharpRange(declaration, declaringAssembly = declaringEntity.Assembly.SimpleName) with
             | Some document -> searches[document.FilePath] <- struct (document, ValueNone)
             | None -> ()
 
@@ -378,7 +380,7 @@ let private slotsImplementedBy (overriding: FSharpMemberOrFunctionOrValue) (solu
         match overriding.ImplementationLocation with
         | None -> return []
         | Some range ->
-            match solution.TryGetDocumentFromFSharpRange range with
+            match solution.TryGetDocumentFromFSharpRange(range, declaringAssembly = overriding.Assembly.SimpleName) with
             | None -> return []
             | Some document ->
                 match! document.TryGetFSharpParseAndCheckResultsAsync UserOpName with
