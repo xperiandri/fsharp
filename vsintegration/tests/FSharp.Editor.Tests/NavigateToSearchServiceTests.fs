@@ -121,8 +121,9 @@ module HeyHo =
                 return TextAndVersion.Create(SourceText.From source, VersionStamp.Create(), path)
             }
 
-    /// The priority document hands its text over only once the other one has been asked for its own, so the
-    /// search ends only if the rest of the project is reached while a priority document is still being read.
+    /// With more than one worker the priority document hands its text over only once the other one has been
+    /// asked for its own, so the search ends only if the rest of the project is reached while a priority
+    /// document is still being read. A single worker reads one document at a time: nothing to wait for.
     [<Fact>]
     let ``a project's priority documents are reached first and do not hold back the rest`` () =
         let first = "C:\\First.fs"
@@ -138,7 +139,10 @@ module HeyHo =
             if path = first then
                 firstReached.TrySetResult() |> ignore
 
-            firstReached.Task
+            if System.Environment.ProcessorCount > 1 then
+                firstReached.Task
+            else
+                Task.CompletedTask
 
         let projectId = ProjectId.CreateNewId()
 
