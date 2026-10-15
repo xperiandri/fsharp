@@ -4203,8 +4203,9 @@ let EliminateNullnessFromInputType (g: TcGlobals) (inputTy: TType) (pat: Pattern
     | _ -> inputTy
 
 [<return: Struct>]
-let (|PrimitiveConstText|_|) (c: Const) =
+let (|ConstText|_|) (c: Const) =
     match c with
+    | Const.String text -> ValueSome text
     | Const.SByte n -> ValueSome(string n)
     | Const.Int16 n -> ValueSome(string n)
     | Const.Int32 n -> ValueSome(string n)
@@ -4218,10 +4219,19 @@ let (|PrimitiveConstText|_|) (c: Const) =
     | Const.Bool n -> ValueSome(string n)
     | _ -> ValueNone
 
+let isBareSpecifierFor (g: TcGlobals) (spec: string) (ty: TType) =
+    match spec with
+    | "%s" -> isStringTy g ty
+    | "%d"
+    | "%i" -> isIntegerTy g ty
+    | "%c" -> typeEquiv g g.char_ty ty
+    | "%M" -> isDecimalTy g ty
+    | _ -> false
+
 let tryConstantHoleText (g: TcGlobals) (formatting: SynInterpolationFormatting) (mHole: range) (hole: Expr) =
     match formatting, EvalLiteralExprOrAttribArg g hole with
-    | (SynInterpolationFormatting.DotNet(None, None) | SynInterpolationFormatting.Printf("%s", _)), Expr.Const(Const.String text, _, _) -> ValueSome text
-    | SynInterpolationFormatting.DotNet(None, None), Expr.Const(PrimitiveConstText text, _, ty) when not (isEnumTy g ty) -> ValueSome text
+    | SynInterpolationFormatting.DotNet(None, None), Expr.Const(ConstText text, _, ty) when not (isEnumTy g ty) -> ValueSome text
+    | SynInterpolationFormatting.Printf(spec, _), Expr.Const(ConstText text, _, ty) when isBareSpecifierFor g spec ty -> ValueSome text
     | _, Expr.Const _ ->
         errorR (Error(FSComp.SR.tcConstantInterpolatedStringHole (), mHole))
         ValueNone
