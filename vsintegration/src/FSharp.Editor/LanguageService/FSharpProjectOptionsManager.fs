@@ -356,10 +356,10 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
 
         referenceWatches.Clear()
 
-    let buildPEReference (referencedProject: Project) (entry: PEReferenceCacheEntry) =
+    // `epoch` is the one the request started under, whichever function of the request this is called from.
+    let buildPEReference (epoch: int) (referencedProject: Project) (entry: PEReferenceCacheEntry) =
         let projectId = referencedProject.Id
         let mutable stamp = DateTime.UtcNow
-        let epoch = publication.Current
 
         // Getting a C# reference assembly can fail if there are compilation errors that cannot be resolved.
         // To mitigate this, we store the last successful compilation of a C# project and re-use it until we get a new successful compilation.
@@ -419,15 +419,16 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
         | true, (entry, fsRefProj) when entry.Version = version -> ValueSome fsRefProj
         | _ -> ValueNone
 
-    let createPEReference (referencedProject: Project) (version: VersionStamp) (comp: Compilation) =
+    let createPEReference (epoch: int) (referencedProject: Project) (version: VersionStamp) (comp: Compilation) =
         let entry = PEReferenceCacheEntry(version, comp)
-        let fsRefProj = buildPEReference referencedProject entry
+        let fsRefProj = buildPEReference epoch referencedProject entry
         peReferences.[referencedProject.Id] <- (entry, fsRefProj)
         fsRefProj
 
-    let rec tryComputeOptionsBySingleScriptOrFile (document: Document) userOpName =
+    // A request takes its epoch once, when it starts, and every function it recurses into publishes under that
+    // one: an epoch taken again after the solution closed would let work of the closed solution publish.
+    let rec tryComputeOptionsBySingleScriptOrFileUnder (epoch: int) (document: Document) userOpName =
         cancellableTask {
-            let epoch = publication.Current
             let! ct = CancellableTask.getCancellationToken ()
             let! fileStamp = document.GetTextVersionAsync(ct)
 
@@ -554,10 +555,13 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
                     | true, cacheEntry -> disposeSingleFileCacheEntry cacheEntry
                     | _ -> ()
 
-                    return! tryComputeOptionsBySingleScriptOrFile document userOpName
+                    return! tryComputeOptionsBySingleScriptOrFileUnder epoch document userOpName
                 else
                     return ValueSome struct (parsingOptions, projectOptions)
         }
+
+    let tryComputeOptionsBySingleScriptOrFile (document: Document) userOpName =
+        cancellableTask { return! tryComputeOptionsBySingleScriptOrFileUnder publication.Current document userOpName }
 
     let tryGetProjectSite (project: Project) =
         // Cps
@@ -569,10 +573,9 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
             | true, site -> ValueSome site
             | _ -> ValueNone
 
-    let rec tryComputeOptions (project: Project) =
+    let rec tryComputeOptionsUnder (epoch: int) (project: Project) =
         cancellableTask {
             let projectId = project.Id
-            let epoch = publication.Current
             let! ct = CancellableTask.getCancellationToken ()
 
             match cache.TryGetValue(projectId) with
@@ -589,7 +592,7 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
                         let referencedProject = project.Solution.GetProject(projectReference.ProjectId)
 
                         if referencedProject.Language = FSharpConstants.FSharpLanguageName then
-                            match! tryComputeOptions referencedProject with
+                            match! tryComputeOptionsUnder epoch referencedProject with
                             | ValueNone -> canBail <- true
                             | ValueSome struct (_, projectOptions) ->
                                 referencedProjects.Add(
@@ -602,7 +605,7 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
                             | ValueSome peRef -> referencedProjects.Add peRef
                             | ValueNone ->
                                 let! comp = referencedProject.GetCompilationAsync(ct)
-                                referencedProjects.Add(createPEReference referencedProject version comp)
+                                referencedProjects.Add(createPEReference epoch referencedProject version comp)
 
                 if canBail then
                     return ValueNone
@@ -720,10 +723,13 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
                         | _ -> ()
 
                     cache.TryRemove(projectId) |> ignore
-                    return! tryComputeOptions project
+                    return! tryComputeOptionsUnder epoch project
                 else
                     return ValueSome struct (parsingOptions, projectOptions)
         }
+
+    let tryComputeOptions (project: Project) =
+        cancellableTask { return! tryComputeOptionsUnder publication.Current project }
 
     let loop (agent: MailboxProcessor<FSharpProjectOptionsMessage>) =
         async {
