@@ -34,10 +34,10 @@ let Verbatim = $@"\{nameof Root}" + $"{Root}"
 let Version = 2
 
 [<Literal>]
-let Scalars = $"v{Version}{'-'}{true}|{-1L}|{18446744073709551615UL}|{-12.3400m}|%s{Root}"
+let Scalars = $"v%d{Version}%c{'-'}{true}|{-1L}|%i{18446744073709551615UL}|%M{-12.3400m}|%s{Root}"
 
 let root, version = Root, Version
-let scalarsAtRunTime = $"v{version}{'-'}{true}|{-1L}|{18446744073709551615UL}|{-12.3400m}|%s{root}"
+let scalarsAtRunTime = $"v%d{version}%c{'-'}{true}|{-1L}|%i{18446744073709551615UL}|%M{-12.3400m}|%s{root}"
 
 type TagAttribute(tags: string[]) =
     inherit System.Attribute()
@@ -114,7 +114,9 @@ type FromLiteral = Provided.Text<Items>"""
     [<Theory>]
     [<InlineData("{1.5}", 3925)>]
     [<InlineData("{Root,10}", 3925)>]
-    [<InlineData("%d{Version}", 3925)>]
+    [<InlineData("%x{Version}", 3925)>]
+    [<InlineData("%b{Flag}", 3925)>]
+    [<InlineData("%d{Root}", 3925)>]
     [<InlineData("%s{Version}", 3925)>]
     [<InlineData("{NoValue}", 3925)>]
     [<InlineData("{System.DayOfWeek.Monday}", 3925)>]
@@ -130,6 +132,8 @@ let Root = "api/v2"
 let Version = 2
 [<Literal>]
 let NoValue: string = null
+[<Literal>]
+let Flag = true
 let dir = "data"
 
 [<Literal>]
@@ -148,7 +152,7 @@ module Program
 let Twice = $"{1.5}{1.5}"
 """
         |> typecheck
-        |> withSingleDiagnostic (Error 3925, Line 5, Col 16, Line 5, Col 19, "This interpolated string must be a constant, so each hole must be a non-null constant string, integer, decimal, character or Boolean, with no alignment and no format specifier other than '%s' for a string.")
+        |> withSingleDiagnostic (Error 3925, Line 5, Col 16, Line 5, Col 19, "This interpolated string must be a constant, so each hole must be a non-null constant string, integer, decimal, character or Boolean, with no alignment and no format specifier other than a bare '%s', '%d', '%i', '%c' or '%M' that matches the type.")
 
     [<Fact>]
     let ``Before the preview language version interpolated strings in literals are unchanged`` () =
