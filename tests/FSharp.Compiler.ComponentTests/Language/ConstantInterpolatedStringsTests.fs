@@ -34,10 +34,10 @@ let Verbatim = $@"\{nameof Root}" + $"{Root}"
 let Version = 2
 
 [<Literal>]
-let Scalars = $"v{Version}{'-'}{true}|{-1L}|{18446744073709551615UL}|{-12.3400m}|%s{Root}"
+let Scalars = $"v%d{Version}%c{'-'}{true}|{-1L}|%i{18446744073709551615UL}|%M{-12.3400m}|%s{Root}"
 
 let root, version = Root, Version
-let scalarsAtRunTime = $"v{version}{'-'}{true}|{-1L}|{18446744073709551615UL}|{-12.3400m}|%s{root}"
+let scalarsAtRunTime = $"v%d{version}%c{'-'}{true}|{-1L}|%i{18446744073709551615UL}|%M{-12.3400m}|%s{root}"
 
 type TagAttribute(tags: string[]) =
     inherit System.Attribute()
@@ -114,7 +114,12 @@ type FromLiteral = Provided.Text<Items>"""
     [<Theory>]
     [<InlineData("{1.5}", 267)>]
     [<InlineData("{Root,10}", 267)>]
-    [<InlineData("%d{Version}", 267)>]
+    [<InlineData("%x{Version}", 267)>]
+    [<InlineData("%b{Flag}", 267)>]
+    [<InlineData("%d{Root}", 267)>]
+    [<InlineData("%d{(Version :> obj)}", 267)>]
+    [<InlineData("%c{('c' :> obj)}", 267)>]
+    [<InlineData("%M{(1m :> obj)}", 267)>]
     [<InlineData("%s{Version}", 267)>]
     [<InlineData("%s{(Root :> obj)}", 267)>]
     [<InlineData("{NoValue}", 267)>]
@@ -131,6 +136,8 @@ let Root = "api/v2"
 let Version = 2
 [<Literal>]
 let NoValue: string = null
+[<Literal>]
+let Flag = true
 let dir = "data"
 
 [<Literal>]
