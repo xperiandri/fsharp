@@ -15,24 +15,25 @@ open FSharp.Editor.Tests.Helpers
 
 module PublicationGateTests =
 
+    let private tryPublish (gate: PublicationGate) epoch =
+        let ran = ref false
+        let published = gate.TryPublish(epoch, fun () -> ran.Value <- true)
+        published, ran.Value
+
     [<Fact>]
     let ``TryPublish runs the action while the epoch is unchanged`` () =
         let gate = PublicationGate()
-        let published = ref false
 
-        Assert.True(gate.TryPublish(gate.Current, fun () -> published.Value <- true))
-        Assert.True published.Value
+        Assert.Equal((true, true), tryPublish gate gate.Current)
 
     [<Fact>]
     let ``TryPublish after Bump neither runs the action nor reports success`` () =
         let gate = PublicationGate()
         let epoch = gate.Current
-        let published = ref false
 
         gate.Bump ignore
 
-        Assert.False(gate.TryPublish(epoch, fun () -> published.Value <- true))
-        Assert.False published.Value
+        Assert.Equal((false, false), tryPublish gate epoch)
 
     [<Fact>]
     let ``Bump and TryPublish exclude each other`` () =
@@ -41,26 +42,19 @@ module PublicationGateTests =
         use clearing = new ManualResetEventSlim(false)
         use release = new ManualResetEventSlim(false)
 
-        // Threads of their own: in a full test run the pool can take longer to start work than any timeout.
         let bump =
-            Thread(
-                (fun () ->
-                    gate.Bump(fun () ->
-                        clearing.Set()
-                        release.Wait())),
-                IsBackground = true
-            )
+            OwnThread.start (fun () ->
+                gate.Bump(fun () ->
+                    clearing.Set()
+                    release.Wait()))
 
-        bump.Start()
         Assert.True(clearing.Wait(TimeSpan.FromSeconds 30.))
 
-        // A publication that started under the old epoch waits for the clear, then sees the epoch moved.
         let published = ref true
 
         let publish =
-            Thread((fun () -> published.Value <- gate.TryPublish(epoch, ignore)), IsBackground = true)
+            OwnThread.start (fun () -> published.Value <- gate.TryPublish(epoch, ignore))
 
-        publish.Start()
         Assert.False(publish.Join(TimeSpan.FromMilliseconds 200.))
 
         release.Set()
@@ -68,9 +62,7 @@ module PublicationGateTests =
         publish.Join()
         Assert.False published.Value
 
-/// The reactor through its manager, with the mock watcher from FileChangeWatcherTests standing in for
-/// the VS file change service. The MEF-created service hard-wires the real watcher, so these tests
-/// build the manager directly.
+/// The MEF-created service hard-wires the real watcher, so these tests build the manager with a mock one.
 module FSharpProjectOptionsManagerWatchTests =
 
     let private referenceDll = typeof<FSharpChecker>.Assembly.Location
@@ -101,10 +93,21 @@ module FSharpProjectOptionsManagerWatchTests =
         manager.SetCommandLineOptions(project.Id, [| "C:\\test.fs" |], ImmutableArray<string>.Empty)
         watcher, manager
 
+    let private optionsOf (manager: FSharpProjectOptionsManager) (project: Project) =
+        manager.TryGetOptionsByProject(project, CancellationToken.None)
+
     let private watchedFiles (watcher: MockFileChangeWatcher) =
         match watcher.Context with
         | ValueSome context -> context.WatchedFiles
         | ValueNone -> []
+
+    let private applyChange (project: Project) (change: Solution -> Solution) =
+        let workspace = project.Solution.Workspace
+        Assert.True(workspace.TryApplyChanges(change workspace.CurrentSolution))
+        workspace.CurrentSolution.GetProject project.Id
+
+    let private withReferences (references: string list) (project: Project) =
+        applyChange project (fun solution -> solution.WithProjectMetadataReferences(project.Id, references |> List.map metadataReference))
 
     [<Fact>]
     let ``Computing options watches the project's references`` () : Task =
@@ -112,7 +115,7 @@ module FSharpProjectOptionsManagerWatchTests =
             let project = createProject [ referenceDll ]
             let watcher, manager = createManager project
 
-            let! options = manager.TryGetOptionsByProject(project, CancellationToken.None)
+            let! options = optionsOf manager project
 
             Assert.True options.IsSome
             Assert.Equal<string list>([ referenceDll ], watchedFiles watcher)
@@ -123,14 +126,12 @@ module FSharpProjectOptionsManagerWatchTests =
         task {
             let project = createProject [ referenceDll ]
             let watcher, manager = createManager project
-            let! _ = manager.TryGetOptionsByProject(project, CancellationToken.None)
+            let! _ = optionsOf manager project
 
             manager.ClearAllCaches()
+            let! options = optionsOf manager project
 
             Assert.Empty(watchedFiles watcher)
-
-            // The command line options went with the caches, so the project has no options any more.
-            let! options = manager.TryGetOptionsByProject(project, CancellationToken.None)
             Assert.True options.IsNone
         }
 
@@ -139,15 +140,13 @@ module FSharpProjectOptionsManagerWatchTests =
         task {
             let project = createProject [ referenceDll ]
             let watcher, manager = createManager project
-            let! _ = manager.TryGetOptionsByProject(project, CancellationToken.None)
+            let! _ = optionsOf manager project
 
             let workspace = project.Solution.Workspace
             Assert.True(workspace.TryApplyChanges(workspace.CurrentSolution.RemoveProject project.Id))
-
-            // The manager's workspace handler posts ClearOptions to the agent; the watch is gone once that ran.
             Assert.True(SpinWait.SpinUntil((fun () -> List.isEmpty (watchedFiles watcher)), TimeSpan.FromSeconds 60.))
 
-            let! options = manager.TryGetOptionsByProject(project, CancellationToken.None)
+            let! options = optionsOf manager project
             Assert.True options.IsNone
         }
 
@@ -156,17 +155,9 @@ module FSharpProjectOptionsManagerWatchTests =
         task {
             let project = createProject [ referenceDll ]
             let watcher, manager = createManager project
-            let! _ = manager.TryGetOptionsByProject(project, CancellationToken.None)
+            let! _ = optionsOf manager project
 
-            let workspace = project.Solution.Workspace
-
-            Assert.True(
-                workspace.TryApplyChanges(
-                    workspace.CurrentSolution.WithProjectMetadataReferences(project.Id, [ metadataReference otherDll ])
-                )
-            )
-
-            let! options = manager.TryGetOptionsByProject(workspace.CurrentSolution.GetProject project.Id, CancellationToken.None)
+            let! options = optionsOf manager (withReferences [ otherDll ] project)
 
             Assert.True options.IsSome
             Assert.Equal<string list>([ otherDll ], watchedFiles watcher)
@@ -181,27 +172,17 @@ module FSharpProjectOptionsManagerWatchTests =
             try
                 let project = createProject [ path ]
                 let _, manager = createManager project
-                let! _ = manager.TryGetOptionsByProject(project, CancellationToken.None)
+                let stamps = manager.ReferenceStamps
+                let! _ = optionsOf manager project
 
-                let stale = manager.ReferenceStamps.GetLastWriteTimeUtc path
-
-                // The file changes and no notification arrives: the tracker answers what it remembers.
+                let stale = stamps.GetLastWriteTimeUtc path
                 let fresh = stale + TimeSpan.FromSeconds 2.
                 File.SetLastWriteTimeUtc(path, fresh)
-                Assert.Equal(stale, manager.ReferenceStamps.GetLastWriteTimeUtc path)
+                Assert.Equal(stale, stamps.GetLastWriteTimeUtc path)
 
-                // Roslyn saw the change and put a new reference at the same path.
-                let workspace = project.Solution.Workspace
+                let! _ = optionsOf manager (withReferences [ path ] project)
 
-                Assert.True(
-                    workspace.TryApplyChanges(
-                        workspace.CurrentSolution.WithProjectMetadataReferences(project.Id, [ metadataReference path ])
-                    )
-                )
-
-                let! _ = manager.TryGetOptionsByProject(workspace.CurrentSolution.GetProject project.Id, CancellationToken.None)
-
-                Assert.Equal(fresh, manager.ReferenceStamps.GetLastWriteTimeUtc path)
+                Assert.Equal(fresh, stamps.GetLastWriteTimeUtc path)
             finally
                 File.Delete path
         }

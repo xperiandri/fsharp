@@ -233,11 +233,8 @@ type private FSharpProjectOptionsMessage =
     | ClearSingleFileOptionsCache of DocumentId
     | ClearAllSingleFileOptions
 
-/// One lock for everything the reactor publishes outside its agent's own serialization: the options
-/// cache, the single-file cache and the reference watches. Closing the solution bumps the epoch and
-/// clears them in the same critical section, and a computation that started before the close finds
-/// the epoch moved when it comes to publish, so old-solution work can never re-add an entry or a
-/// watch behind it. Nothing that blocks (I/O, COM, FCS) may run inside the lock.
+/// One lock for what the reactor publishes. Closing the solution moves the epoch, and a request publishes only
+/// under the epoch it took when it started. Nothing that blocks (I/O, COM, FCS) may run inside the lock.
 [<Sealed>]
 type internal PublicationGate() =
     let gate = obj ()
@@ -247,13 +244,11 @@ type internal PublicationGate() =
 
     member _.Run(action: unit -> 'T) = lock gate action
 
-    /// Moves to the next epoch and runs `clear` in the same critical section.
     member _.Bump(clear: unit -> 'T) =
         lock gate (fun () ->
             epoch <- epoch + 1
             clear ())
 
-    /// Runs `publish` only if no Bump happened since `captured` was read.
     member _.TryPublish(captured: int, publish: unit -> unit) =
         lock gate (fun () ->
             if epoch = captured then
@@ -293,15 +288,11 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
             | true, cacheEntry -> disposeSingleFileCacheEntry cacheEntry
             | _ -> ()
 
-    // Each project's '-r:' set is watched for the reference stamps its snapshots and its incremental builder
-    // read. Roslyn watches only MetadataReferences and invalidates those itself by bumping Project.Version;
-    // a project reference's output dll is a ProjectReference to Roslyn and is watched only here.
     let referenceChangeTracker = new FSharpReferenceChangeTracker(fileChangeWatcher)
     let referenceStamps = referenceChangeTracker :> IReferenceStamps
 
     let publication = PublicationGate()
 
-    // Guarded by `publication`, like every write that adds to `cache` or `singleFileCache`.
     let referenceWatches = Dictionary<ProjectId, HashSet<string>>()
 
     let referencePaths (projectOptions: FSharpProjectOptions) =
@@ -313,7 +304,6 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
 
         paths
 
-    // Callers hold `publication`.
     let watchReferenceFilesNoLock (projectId: ProjectId) (projectOptions: FSharpProjectOptions) =
         let paths = referencePaths projectOptions
 
@@ -335,7 +325,6 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
         else
             referenceWatches.Remove projectId |> ignore
 
-    // Callers hold `publication`.
     let clearReferenceWatchesNoLock (projectId: ProjectId) =
         match referenceWatches.TryGetValue projectId with
         | true, paths ->
@@ -348,7 +337,6 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
     let clearReferenceWatches (projectId: ProjectId) =
         publication.Run(fun () -> clearReferenceWatchesNoLock projectId)
 
-    // Callers hold `publication`.
     let clearAllReferenceWatchesNoLock () =
         for KeyValue(_, paths) in referenceWatches do
             for path in paths do
@@ -356,7 +344,6 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
 
         referenceWatches.Clear()
 
-    // `epoch` is the one the request started under, whichever function of the request this is called from.
     let buildPEReference (epoch: int) (referencedProject: Project) (entry: PEReferenceCacheEntry) =
         let projectId = referencedProject.Id
         let mutable stamp = DateTime.UtcNow
@@ -425,8 +412,6 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
         peReferences.[referencedProject.Id] <- (entry, fsRefProj)
         fsRefProj
 
-    // A request takes its epoch once, when it starts, and every function it recurses into publishes under that
-    // one: an epoch taken again after the solution closed would let work of the closed solution publish.
     let rec tryComputeOptionsBySingleScriptOrFileUnder (epoch: int) (document: Document) userOpName =
         cancellableTask {
             let! ct = CancellableTask.getCancellationToken ()
@@ -518,7 +503,6 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
                         Subscription = subscription
                     }
 
-                // The subscription is a COM advise and stays outside the gate.
                 let entry =
                     addToCacheAndSubscribe
                         {
@@ -532,7 +516,6 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
                 if publication.TryPublish(epoch, fun () -> singleFileCache.[document.Id] <- entry) then
                     return ValueSome struct (parsingOptions, projectOptions)
                 else
-                    // The solution closed while this was computing; the document went with it.
                     disposeSingleFileCacheEntry entry
                     return ValueNone
 
@@ -572,6 +555,15 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
             match legacyProjectSites.TryGetValue project.Id with
             | true, site -> ValueSome site
             | _ -> ValueNone
+
+    let invalidateStampsOfReplacedMetadataReferences (oldProject: Project) (project: Project) =
+        for reference in project.GetChanges(oldProject).GetAddedMetadataReferences() do
+            match reference with
+            | :? PortableExecutableReference as peReference ->
+                match peReference.FilePath with
+                | null -> ()
+                | path -> referenceStamps.Invalidate path
+            | _ -> ()
 
     let rec tryComputeOptionsUnder (epoch: int) (project: Project) =
         cancellableTask {
@@ -703,8 +695,7 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
                             if published then
                                 return ValueSome struct (parsingOptions, projectOptions)
                             else
-                                // The solution closed while this was computing: undo the FCS side of it and
-                                // answer as for a project that is not in the workspace.
+                                // The solution closed meanwhile: take back what FCS was told about these options.
                                 checker.ClearCache([ projectOptions ], userOpName = "tryComputeOptions")
                                 return ValueNone
 
@@ -712,16 +703,7 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker, fileChangeWatch
                 let! isInvalidated = isProjectInvalidated oldProject project
 
                 if isInvalidated then
-                    // Roslyn is the source of truth for a swapped MetadataReference: the path stays and the
-                    // file behind it changed, so a notification this tracker missed must not keep its stamp.
-                    for reference in project.GetChanges(oldProject).GetAddedMetadataReferences() do
-                        match reference with
-                        | :? PortableExecutableReference as peReference ->
-                            match peReference.FilePath with
-                            | null -> ()
-                            | path -> referenceStamps.Invalidate path
-                        | _ -> ()
-
+                    invalidateStampsOfReplacedMetadataReferences oldProject project
                     cache.TryRemove(projectId) |> ignore
                     return! tryComputeOptionsUnder epoch project
                 else
