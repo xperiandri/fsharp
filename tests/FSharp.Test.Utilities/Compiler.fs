@@ -2563,6 +2563,7 @@ $ code --diff {outFile} {expectedFile}
 
     /// Run an F# tool (FSI or FSC) as a subprocess. Shared helper for runFsiProcess / runFscProcess.
     let private runToolProcess (toolPath: string) (workingDirectory: string) (args: string list) : ProcessResult =
+        let quotedArgs = args |> List.map quoteArg |> String.concat " "
 #if NETCOREAPP
         let exe = TestFramework.initialConfig.DotNetExe
         let arguments = quoteArg toolPath + " " + quotedArgs

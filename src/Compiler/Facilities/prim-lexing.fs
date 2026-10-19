@@ -190,9 +190,9 @@ module SourceTextNew =
 
                 member _.GetSubTextFromRange(x) = sourceText.GetSubTextFromRange(x)
 
-            member _.GetChecksum() =
-                ImmutableCollectionsMarshal.AsImmutableArray<byte>(Md5Hasher.hashString (!!sourceText.ToString()))
-        }
+                member _.GetChecksum() =
+                    ImmutableCollectionsMarshal.AsImmutableArray<byte>(Md5Hasher.hashString (sourceText.GetSubTextString(0, sourceText.Length)))
+            }
 
 // NOTE: the code in this file is a drop-in replacement runtime for Lexing.fs from the FsLexYacc repository
 
