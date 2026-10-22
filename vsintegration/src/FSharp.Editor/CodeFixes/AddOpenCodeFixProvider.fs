@@ -333,14 +333,24 @@ type internal AddOpenCodeFixProvider [<ImportingConstructor>] (assemblyContentPr
                         |> Array.replace (symbol.CleanedIdents.Length - 1) (lastIdent.Substring(0, lastIdent.Length - 9))
         }
 
-    let getNameCandidates (symbols: AssemblySymbol[]) isAttribute (findEntities: EntityFinder) =
+    // A case reached by another name than the one typed is only qualified; one typed as it is, is opened by its module.
+    let adjustForActivePatternCase patternName (symbol: AssemblySymbol) (entity: InsertionContextEntity) =
+        if symbol.Symbol :? FSharpActivePatternCase then
+            if entity.FullDisplayName <> "" && entity.FullDisplayName <> patternName then
+                { entity with Namespace = None }
+            else
+                { entity with FullDisplayName = "" }
+        else
+            entity
+
+    let getNameCandidates (symbols: AssemblySymbol[]) isAttribute patternName (findEntities: EntityFinder) =
         symbols
         |> Seq.filter isReachedByName
         |> Seq.collect (fun symbol ->
             nameIdentsOf symbol isAttribute
             |> Seq.collect (fun idents ->
                 findEntities (symbol.TopRequireQualifiedAccessParent, symbol.AutoOpenParent, symbol.Namespace, idents)
-                |> Seq.map (fun (entity, ctx) -> entity, ctx, symbol)))
+                |> Seq.map (fun (entity, ctx) -> adjustForActivePatternCase patternName symbol entity, ctx, symbol)))
         |> Seq.toList
 
     let toMaybeUnresolvedIdents (unresolvedIdentRange: range) (longIdent: LongIdent) =
@@ -452,8 +462,48 @@ type internal AddOpenCodeFixProvider [<ImportingConstructor>] (assemblyContentPr
                         let isAttribute =
                             ParsedInput.GetEntityKind(unresolvedIdentRange.Start, parseResults.ParseTree) = Some EntityKind.Attribute
 
-                        let symbols =
+                        let catalogue =
                             assemblyContentProvider.GetAllEntitiesInProjectAndReferencedAssemblies checkResults
+
+                        let casesInScope = HashSet<string>(StringComparer.Ordinal)
+                        let sourceLine = line.ToString()
+
+                        match ParsedInput.TryGetCompletionContext(unresolvedIdentRange.End, parseResults.ParseTree, sourceLine) with
+                        | Some(CompletionContext.Pattern _) ->
+                            context.CancellationToken.ThrowIfCancellationRequested()
+
+                            let cases =
+                                [
+                                    for symbol in catalogue do
+                                        if symbol.Symbol :? FSharpActivePatternCase then
+                                            yield symbol
+                                ]
+
+                            let partialName =
+                                { QuickParse.GetPartialLongNameEx(sourceLine, linePos.Character - 1) with
+                                    QualifyingIdents = []
+                                    PartialIdent = ""
+                                    LastDotPos = None
+                                }
+
+                            let declarations =
+                                checkResults.GetDeclarationListSymbols(
+                                    Some parseResults,
+                                    unresolvedIdentRange.EndLine,
+                                    sourceLine,
+                                    partialName,
+                                    getAllEntities = (fun () -> cases)
+                                )
+
+                            for group in declarations do
+                                for symbol in group do
+                                    if symbol.Symbol :? FSharpActivePatternCase then
+                                        casesInScope.Add symbol.Symbol.FullName |> ignore
+                        | _ -> ()
+
+                        let symbols =
+                            catalogue
+                            |> Array.filter (fun s -> not (s.Symbol :? FSharpActivePatternCase) || casesInScope.Contains s.FullName)
 
                         ParsedInput.GetLongIdentAt parseResults.ParseTree unresolvedIdentRange.End
                         |> Option.map (fun longIdent ->
@@ -477,8 +527,13 @@ type internal AddOpenCodeFixProvider [<ImportingConstructor>] (assemblyContentPr
                                 match receiver with
                                 | ValueSome(MemberReceiver.Value _) -> []
                                 | _ ->
+                                    let patternName =
+                                        longIdent
+                                        |> List.map (fun ident -> PrettyNaming.NormalizeIdentifierBackticks ident.idText)
+                                        |> String.concat "."
+
                                     createEntity (toMaybeUnresolvedIdents unresolvedIdentRange longIdent)
-                                    |> getNameCandidates symbols isAttribute
+                                    |> getNameCandidates symbols isAttribute patternName
 
                             let extensionOpens =
                                 match receiver, longIdent |> List.tryFind (fun ident -> ident.idRange = unresolvedIdentRange) with

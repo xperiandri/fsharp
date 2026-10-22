@@ -276,7 +276,7 @@ module Entity =
                         let ns =
                             match relativeNs with
                             | [||] -> None
-                            | _ -> Some(withoutQualifierWritten relativeNs |> String.concat ".")
+                            | _ -> Some(withoutQualifierWritten relativeNs |> formatIdents false)
 
                         let qualifier =
                             if fullRelativeName.Length > 1 && fullRelativeName.Length >= identCount then
