@@ -120,8 +120,12 @@ let private assertFixedCode (expected: string) (actual: string) =
     Assert.Equal(expected, actual.Replace("\r\n", "\n"))
     assertCompiles actual
 
+/// The first of the fixes the provider offers; it offers several.
+let private tryFirstFix code mode provider =
+    provider |> multiFix code mode |> Seq.tryHead
+
 let private addOpenFix code mode =
-    AddOpenCodeFixProvider(AssemblyContentProvider()) |> tryFix code mode
+    AddOpenCodeFixProvider(AssemblyContentProvider()) |> tryFirstFix code mode
 
 [<Theory>]
 [<InlineData("Even", "", "Candidates.Normal", true)>]
@@ -151,10 +155,10 @@ let ``Add Open applied case uses exact target and placement`` (caseName: string,
 
     let mode = WithSettings(placement atTop)
 
-    let fix = provider |> tryFix code mode |> Option.get
+    let fix = provider |> tryFirstFix code mode |> Option.get
     Assert.Equal($"open {ns}", fix.Message)
     assertFixedCode (withOpen atTop ns code) fix.FixedCode
-    Assert.Equal(None, provider |> tryFix fix.FixedCode mode)
+    Assert.Equal(None, provider |> tryFirstFix fix.FixedCode mode)
 
 [<Theory>]
 [<InlineData("let classify value = match value with | Deep n -> n | _ -> 0", "Candidates", true, false, "")>]
@@ -182,7 +186,7 @@ let ``Add Open supports adjacent headers without changing existing spacing``
 
     let mode = WithSettings(placement atTop)
 
-    let fix = provider |> tryFix code mode |> Option.get
+    let fix = provider |> tryFirstFix code mode |> Option.get
     Assert.Equal($"open {ns}", fix.Message)
 
     let expected =
@@ -198,7 +202,7 @@ let ``Add Open supports adjacent headers without changing existing spacing``
             code.Replace("module Use =\n", $"module Use =\n    open {ns}\n\n")
 
     assertFixedCode expected fix.FixedCode
-    Assert.Equal(None, provider |> tryFix fix.FixedCode mode)
+    Assert.Equal(None, provider |> tryFirstFix fix.FixedCode mode)
 
 [<Theory>]
 [<InlineData(true)>]
@@ -543,11 +547,12 @@ let ``referenced case Add Open uses the nearest physical scope without self-qual
             | ValueNone -> failwith "Expected automatic referenced-case diagnostic"
 
     let fix =
-        (provider :> IFSharpCodeFixProvider).GetCodeFixIfAppliesAsync context
+        (provider :> IFSharpMultiCodeFixProvider).GetCodeFixesAsync context
         |> CancellableTask.runSynchronouslyWithoutCancellation
+        |> Seq.tryHead
         |> function
-            | ValueSome fix -> fix
-            | ValueNone -> failwith "Expected referenced-case Add Open"
+            | Some fix -> fix
+            | None -> failwith "Expected referenced-case Add Open"
 
     Assert.Equal("open Outer.Patterns", fix.Message)
     let actual = text.WithChanges(fix.Changes).ToString()
