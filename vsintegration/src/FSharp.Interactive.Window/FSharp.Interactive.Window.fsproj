@@ -41,7 +41,8 @@
     <PackageReference Include="Microsoft.VisualStudio.InteractiveWindow" PrivateAssets="all" ExcludeAssets="runtime;contentFiles;build;analyzers;native" />
     <PackageReference Include="Microsoft.VisualStudio.Editor" PrivateAssets="all" ExcludeAssets="runtime;contentFiles;build;analyzers;native" />
     <PackageReference Include="Microsoft.VisualStudio.VsInteractiveWindow" PrivateAssets="all" ExcludeAssets="runtime;contentFiles;build;analyzers;native" />
-    <PackageReference Include="Microsoft.VisualStudio.Shell.15.0" PrivateAssets="all" ExcludeAssets="runtime;contentFiles;build;analyzers;native" />
+    <!-- Not a central version: transitive pinning would raise Shell.15.0 in every project that has it, and with it the analyzers it brings. -->
+    <PackageReference Include="Microsoft.VisualStudio.Shell.15.0" VersionOverride="18.12.772" PrivateAssets="all" ExcludeAssets="runtime;contentFiles;build;analyzers;native" />
     <PackageReference Include="Microsoft.VisualStudio.ComponentModelHost" PrivateAssets="all" ExcludeAssets="runtime;contentFiles;build;analyzers;native" />
     <PackageReference Include="StreamJsonRpc" PrivateAssets="all" ExcludeAssets="runtime;contentFiles;build;analyzers;native" />
   </ItemGroup>

@@ -28,7 +28,7 @@
     <PackageVersion Include="FsCheck" Version="2.16.6" />
     <PackageVersion Include="FSharp.Core" Version="$(FSharpCoreShippedPackageVersionValue)" />
     <!-- Security: pin the transitive MessagePack (pulled via StreamJsonRpc) to a patched version.
-         Versions < 2.5.301 have known vulnerabilities (NU1902/NU1903). Transitive pinning applies it
+         Versions < 2.5.303 have known vulnerabilities (NU1902/NU1903). Transitive pinning applies it
          wherever StreamJsonRpc is used (FSharp.Compiler.LanguageServer and the CLASP.Framework.Proxy). -->
     <PackageVersion Include="MessagePack" Version="2.5.303" />
     <PackageVersion Include="Microsoft.Build" Version="$(MicrosoftBuildVersion)" />
@@ -96,8 +96,6 @@
     <PackageVersion Include="Microsoft.VisualStudio.ProjectSystem.Managed" Version="2.3.6152103" />
     <PackageVersion Include="Microsoft.VisualStudio.ProjectSystem.Query" Version="17.13.66" />
     <PackageVersion Include="Microsoft.VisualStudio.Shell.Design" Version="18.12.772" />
-    <!-- Pinned to the version Shell.Design resolves it at. -->
-    <PackageVersion Include="Microsoft.VisualStudio.Shell.15.0" Version="18.12.772" />
     <PackageVersion Include="Microsoft.VisualStudio.VsInteractiveWindow" Version="4.0.0" />
     <PackageVersion Include="Microsoft.VisualStudio.Shell.Immutable.10.0" Version="10.0.30319" />
     <PackageVersion Include="Microsoft.VisualStudio.Shell.Immutable.11.0" Version="11.0.50727" />
