@@ -176,8 +176,6 @@ module internal SymbolHelpers =
                 TelemetryReporter.ReportSingleEvent(TelemetryEvents.GetSymbolUsesInProjectsFinished, props)
             }
 
-    /// The project-wide index behind `getSymbolUsesInProjects` leaves out names inside `///` comments, and only
-    /// a declaration carries them, so they are read from the check results of the files that declare the symbol.
     let private findXmlDocUsesInDeclaringFiles
         (symbol: FSharpSymbol)
         (currentDocument: Document)
