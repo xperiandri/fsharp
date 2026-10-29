@@ -120,12 +120,10 @@ let private assertFixedCode (expected: string) (actual: string) =
     Assert.Equal(expected, actual.Replace("\r\n", "\n"))
     assertCompiles actual
 
-/// The first of the fixes the provider offers; it offers several.
-let private tryFirstFix code mode provider =
+let private tryFirstFix code mode (provider: AddOpenCodeFixProvider) =
     provider |> multiFix code mode |> Seq.tryHead
 
-/// The fix with the given message: the one a test is about need not be the first of those offered.
-let private fixNamed (message: string) code mode provider =
+let private fixNamed (message: string) code mode (provider: AddOpenCodeFixProvider) =
     let fixes = provider |> multiFix code mode |> Seq.toList
 
     match fixes |> List.tryFind (fun fix -> fix.Message = message) with
@@ -185,7 +183,7 @@ let ``Add Open applied case uses exact target and placement`` (caseName: string,
 [<InlineData("let value: Thing = Unchecked.defaultof<_>", "Patterns", false, true, "Outer")>]
 [<InlineData("let classify value = match value with | Case n -> n | _ -> 0", "Closed.Patterns", true, true, "Closed")>]
 [<InlineData("let classify value = match value with | Case n -> n | _ -> 0", "Closed.Patterns", false, true, "Closed")>]
-let ``Add Open supports adjacent headers without changing existing spacing``
+let ``Add Open supports adjacent headers and separates the open from them``
     (body: string, ns: string, atTop: bool, sameFile: bool, container: string)
     =
     let code =

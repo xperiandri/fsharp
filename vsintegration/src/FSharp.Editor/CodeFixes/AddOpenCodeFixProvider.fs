@@ -3,7 +3,6 @@
 namespace Microsoft.VisualStudio.FSharp.Editor
 
 open System
-open System.Collections.Generic
 open System.Composition
 open System.Collections.Generic
 open System.Collections.Immutable
@@ -29,7 +28,16 @@ type internal MemberReceiver =
 type internal ReceiverTypes = ResizeArray<struct (string * FSharpType)>
 
 type internal EntityFinder =
-    (ShortIdents option * ShortIdents option * ShortIdents option * ShortIdents) -> (InsertionContextEntity * InsertionContext)[]
+    (ShortIdents option * ShortIdents option * ShortIdents option * ShortIdents)
+        -> struct (InsertionContextEntity * InsertionContext * int)[]
+
+type internal NameCandidate =
+    {
+        Entity: InsertionContextEntity
+        Context: InsertionContext
+        Symbol: AssemblySymbol
+        NamespaceIdentCount: int
+    }
 
 [<ExportCodeFixProvider(FSharpConstants.FSharpLanguageName, Name = CodeFix.AddOpen); Shared>]
 type internal AddOpenCodeFixProvider [<ImportingConstructor>] (assemblyContentProvider: AssemblyContentProvider) =
@@ -90,8 +98,10 @@ type internal AddOpenCodeFixProvider [<ImportingConstructor>] (assemblyContentPr
     let isCSharpStyleExtension (method: FSharpMemberOrFunctionOrValue) =
         not method.IsExtensionMember && method.HasAttribute<ExtensionAttribute>()
 
-    let tryGetOpenDeclaration (entity: InsertionContextEntity) (symbol: AssemblySymbol) ns =
-        match symbol.Symbol, tryFindModuleOrTypeNamedByLeading entity.NamespaceIdentCount symbol.CleanedIdents.Length symbol.Symbol with
+    let tryGetOpenDeclaration (candidate: NameCandidate) ns =
+        let symbol = candidate.Symbol
+
+        match symbol.Symbol, tryFindModuleOrTypeNamedByLeading candidate.NamespaceIdentCount symbol.CleanedIdents.Length symbol.Symbol with
         | (:? FSharpMemberOrFunctionOrValue as method), _ when isCSharpStyleExtension method -> ValueNone
         | _, ValueSome opened when opened.IsFSharpModule -> ValueSome $"open {ns}"
         | _, ValueSome opened when opened.GenericParameters.Count > 0 -> ValueNone
@@ -193,14 +203,39 @@ type internal AddOpenCodeFixProvider [<ImportingConstructor>] (assemblyContentPr
         | Some extendedName -> receiverTypes.Exists(fun struct (name, _) -> name = extendedName)
         | None -> true
 
+    let hasPublicDefaultConstructor (entity: FSharpEntity) =
+        entity.MembersFunctionsAndValues
+        |> Seq.exists (fun candidate ->
+            candidate.IsConstructor
+            && candidate.Accessibility.IsPublic
+            && candidate.CurriedParameterGroups |> Seq.forall (fun group -> group.Count = 0))
+
+    let definitionMeetsKindConstraint (definition: FSharpEntity) (typeConstraint: FSharpGenericParameterConstraint) =
+        (not typeConstraint.IsNonNullableValueTypeConstraint || definition.IsValueType)
+        && (not typeConstraint.IsReferenceTypeConstraint || not definition.IsValueType)
+        && (not typeConstraint.IsUnmanagedConstraint || definition.IsValueType)
+        && (not typeConstraint.IsEnumConstraint || definition.IsEnum)
+        && (not typeConstraint.IsDelegateConstraint || definition.IsDelegate)
+        && (not typeConstraint.IsRequiresDefaultConstructorConstraint
+            || definition.IsValueType
+            || hasPublicDefaultConstructor definition)
+
+    let receiverMeetsKindConstraint (receiverTypes: ReceiverTypes) (typeConstraint: FSharpGenericParameterConstraint) =
+        receiverTypes.Count = 0
+        || (let struct (_, receiver) = receiverTypes[0]
+            definitionMeetsKindConstraint receiver.ErasedType.TypeDefinition typeConstraint)
+
+    let receiverMeetsConstraint (receiverTypes: ReceiverTypes) (typeConstraint: FSharpGenericParameterConstraint) =
+        receiverMeetsKindConstraint receiverTypes typeConstraint
+        && (not typeConstraint.IsCoercesToConstraint
+            || typeConstraint.CoercesToTarget.IsGenericParameter
+            || receiverTypesInclude receiverTypes typeConstraint.CoercesToTarget)
+
     let csharpExtensionExtendsOneOf (receiverTypes: ReceiverTypes) (extension: FSharpMemberOrFunctionOrValue) =
         match extension.CurriedParameterGroups |> Seq.tryHead |> Option.bind Seq.tryHead with
         | Some thisParameter when thisParameter.Type.IsGenericParameter ->
             thisParameter.Type.GenericParameter.Constraints
-            |> Seq.forall (fun typeConstraint ->
-                not typeConstraint.IsCoercesToConstraint
-                || typeConstraint.CoercesToTarget.IsGenericParameter
-                || receiverTypesInclude receiverTypes typeConstraint.CoercesToTarget)
+            |> Seq.forall (receiverMeetsConstraint receiverTypes)
         | Some thisParameter -> receiverTypesInclude receiverTypes thisParameter.Type
         | None -> true
 
@@ -311,7 +346,7 @@ type internal AddOpenCodeFixProvider [<ImportingConstructor>] (assemblyContentPr
         =
         [
             for struct (symbol, target) in getExtensionOpenTargets checkResults receiver name symbols cancellationToken do
-                for entity, ctx in findEntities (None, None, symbol.Namespace, Array.append target [| name |]) do
+                for struct (entity, ctx, _) in findEntities (None, None, symbol.Namespace, Array.append target [| name |]) do
                     match entity.Namespace with
                     | Some ns -> $"open {ns}", entity.FullDisplayName, ctx
                     | None -> ()
@@ -333,24 +368,84 @@ type internal AddOpenCodeFixProvider [<ImportingConstructor>] (assemblyContentPr
                         |> Array.replace (symbol.CleanedIdents.Length - 1) (lastIdent.Substring(0, lastIdent.Length - 9))
         }
 
-    // A case reached by another name than the one typed is only qualified; one typed as it is, is opened by its module.
-    let adjustForActivePatternCase patternName (symbol: AssemblySymbol) (entity: InsertionContextEntity) =
-        if symbol.Symbol :? FSharpActivePatternCase then
-            if entity.FullDisplayName <> "" && entity.FullDisplayName <> patternName then
-                { entity with Namespace = None }
-            else
-                { entity with FullDisplayName = "" }
-        else
-            entity
+    let getCasesInScope
+        (context: CodeFixContext)
+        (parseResults: FSharpParseFileResults)
+        (checkResults: FSharpCheckFileResults)
+        (symbols: AssemblySymbol[])
+        (unresolvedIdentRange: range)
+        (line: TextLine)
+        (linePos: LinePosition)
+        =
+        let casesInScope = HashSet<string>(StringComparer.Ordinal)
+        let sourceLine = line.ToString()
 
-    let getNameCandidates (symbols: AssemblySymbol[]) isAttribute patternName (findEntities: EntityFinder) =
+        match ParsedInput.TryGetCompletionContext(unresolvedIdentRange.End, parseResults.ParseTree, sourceLine) with
+        | Some(CompletionContext.Pattern _) ->
+            context.CancellationToken.ThrowIfCancellationRequested()
+
+            let cases =
+                [
+                    for symbol in symbols do
+                        if symbol.Symbol :? FSharpActivePatternCase then
+                            yield symbol
+                ]
+
+            let partialName =
+                { QuickParse.GetPartialLongNameEx(sourceLine, linePos.Character - 1) with
+                    QualifyingIdents = []
+                    PartialIdent = ""
+                    LastDotPos = None
+                }
+
+            let visible =
+                checkResults.GetDeclarationListSymbols(
+                    Some parseResults,
+                    unresolvedIdentRange.EndLine,
+                    sourceLine,
+                    partialName,
+                    getAllEntities = (fun () -> cases)
+                )
+
+            for group in visible do
+                for symbol in group do
+                    if symbol.Symbol :? FSharpActivePatternCase then
+                        casesInScope.Add symbol.Symbol.FullName |> ignore
+        | _ -> ()
+
+        casesInScope
+
+    let withPatternName (patternName: string) (symbol: AssemblySymbol) (entity: InsertionContextEntity) =
+        if not (symbol.Symbol :? FSharpActivePatternCase) then
+            entity
+        elif entity.FullDisplayName <> "" && entity.FullDisplayName <> patternName then
+            { entity with Namespace = None }
+        else
+            { entity with FullDisplayName = "" }
+
+    let getNameCandidates
+        (symbols: AssemblySymbol[])
+        isAttribute
+        (casesInScope: HashSet<string>)
+        (patternName: string)
+        (findEntities: EntityFinder)
+        =
         symbols
         |> Seq.filter isReachedByName
+        |> Seq.filter (fun symbol ->
+            not (symbol.Symbol :? FSharpActivePatternCase)
+            || casesInScope.Contains symbol.FullName)
         |> Seq.collect (fun symbol ->
             nameIdentsOf symbol isAttribute
             |> Seq.collect (fun idents ->
                 findEntities (symbol.TopRequireQualifiedAccessParent, symbol.AutoOpenParent, symbol.Namespace, idents)
-                |> Seq.map (fun (entity, ctx) -> adjustForActivePatternCase patternName symbol entity, ctx, symbol)))
+                |> Seq.map (fun (struct (entity, ctx, namespaceIdentCount)) ->
+                    {
+                        Entity = withPatternName patternName symbol entity
+                        Context = ctx
+                        Symbol = symbol
+                        NamespaceIdentCount = namespaceIdentCount
+                    })))
         |> Seq.toList
 
     let toMaybeUnresolvedIdents (unresolvedIdentRange: range) (longIdent: LongIdent) =
@@ -365,16 +460,16 @@ type internal AddOpenCodeFixProvider [<ImportingConstructor>] (assemblyContentPr
     let getSuggestionsAsCodeFixes
         (firstIdentSpan: TextSpan)
         (sourceText: SourceText)
-        (candidates: (InsertionContextEntity * InsertionContext * AssemblySymbol) list)
+        (candidates: NameCandidate list)
         (extensionOpens: (string * string * InsertionContext) list)
         =
         let nameOpens =
             candidates
-            |> Seq.chooseV (fun (entity, ctx, symbol) ->
-                match entity.Namespace with
+            |> Seq.chooseV (fun candidate ->
+                match candidate.Entity.Namespace with
                 | Some ns ->
-                    tryGetOpenDeclaration entity symbol ns
-                    |> ValueOption.map (fun declaration -> declaration, entity.FullDisplayName, ctx)
+                    tryGetOpenDeclaration candidate ns
+                    |> ValueOption.map (fun declaration -> declaration, candidate.Entity.FullDisplayName, candidate.Context)
                 | None -> ValueNone)
 
         seq {
@@ -396,8 +491,9 @@ type internal AddOpenCodeFixProvider [<ImportingConstructor>] (assemblyContentPr
             |> Seq.map (fun (declaration, name, ctx, multipleNames) -> openNamespaceFix ctx name declaration multipleNames sourceText)
 
             candidates
-            |> Seq.filter (fun (entity, _, _) -> isQualifiable entity)
-            |> Seq.map (fun (entity, _, _) -> entity.FullRelativeName, entity.Qualifier)
+            |> Seq.map _.Entity
+            |> Seq.filter isQualifiable
+            |> Seq.map (fun entity -> entity.FullRelativeName, entity.Qualifier)
             |> Seq.distinct
             |> Seq.sortBy (fst >> qualificationOrder)
             |> Seq.truncate maxQualifySuggestions
@@ -462,48 +558,8 @@ type internal AddOpenCodeFixProvider [<ImportingConstructor>] (assemblyContentPr
                         let isAttribute =
                             ParsedInput.GetEntityKind(unresolvedIdentRange.Start, parseResults.ParseTree) = Some EntityKind.Attribute
 
-                        let catalogue =
-                            assemblyContentProvider.GetAllEntitiesInProjectAndReferencedAssemblies checkResults
-
-                        let casesInScope = HashSet<string>(StringComparer.Ordinal)
-                        let sourceLine = line.ToString()
-
-                        match ParsedInput.TryGetCompletionContext(unresolvedIdentRange.End, parseResults.ParseTree, sourceLine) with
-                        | Some(CompletionContext.Pattern _) ->
-                            context.CancellationToken.ThrowIfCancellationRequested()
-
-                            let cases =
-                                [
-                                    for symbol in catalogue do
-                                        if symbol.Symbol :? FSharpActivePatternCase then
-                                            yield symbol
-                                ]
-
-                            let partialName =
-                                { QuickParse.GetPartialLongNameEx(sourceLine, linePos.Character - 1) with
-                                    QualifyingIdents = []
-                                    PartialIdent = ""
-                                    LastDotPos = None
-                                }
-
-                            let declarations =
-                                checkResults.GetDeclarationListSymbols(
-                                    Some parseResults,
-                                    unresolvedIdentRange.EndLine,
-                                    sourceLine,
-                                    partialName,
-                                    getAllEntities = (fun () -> cases)
-                                )
-
-                            for group in declarations do
-                                for symbol in group do
-                                    if symbol.Symbol :? FSharpActivePatternCase then
-                                        casesInScope.Add symbol.Symbol.FullName |> ignore
-                        | _ -> ()
-
                         let symbols =
-                            catalogue
-                            |> Array.filter (fun s -> not (s.Symbol :? FSharpActivePatternCase) || casesInScope.Contains s.FullName)
+                            assemblyContentProvider.GetAllEntitiesInProjectAndReferencedAssemblies checkResults
 
                         ParsedInput.GetLongIdentAt parseResults.ParseTree unresolvedIdentRange.End
                         |> Option.map (fun longIdent ->
@@ -514,8 +570,8 @@ type internal AddOpenCodeFixProvider [<ImportingConstructor>] (assemblyContentPr
                                     OpenStatementInsertionPoint.Nearest
 
                             let createEntity (maybeUnresolvedIdents: MaybeUnresolvedIdent[]) : EntityFinder =
-                                ParsedInput.TryFindInsertionContext
-                                    unresolvedIdentRange.StartLine
+                                ParsedInput.TryFindInsertionContextAt
+                                    unresolvedIdentRange.Start
                                     parseResults.ParseTree
                                     maybeUnresolvedIdents
                                     insertionPoint
@@ -527,13 +583,16 @@ type internal AddOpenCodeFixProvider [<ImportingConstructor>] (assemblyContentPr
                                 match receiver with
                                 | ValueSome(MemberReceiver.Value _) -> []
                                 | _ ->
+                                    let casesInScope =
+                                        getCasesInScope context parseResults checkResults symbols unresolvedIdentRange line linePos
+
                                     let patternName =
                                         longIdent
                                         |> List.map (fun ident -> PrettyNaming.NormalizeIdentifierBackticks ident.idText)
                                         |> String.concat "."
 
                                     createEntity (toMaybeUnresolvedIdents unresolvedIdentRange longIdent)
-                                    |> getNameCandidates symbols isAttribute patternName
+                                    |> getNameCandidates symbols isAttribute casesInScope patternName
 
                             let extensionOpens =
                                 match receiver, longIdent |> List.tryFind (fun ident -> ident.idRange = unresolvedIdentRange) with

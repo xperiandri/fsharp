@@ -231,13 +231,6 @@ module internal RoslynHelpers =
         Async.Start(computation, cancellationToken)
 
 module internal OpenDeclarationHelper =
-    let getInsertionPosition (getLineStr: int -> string) (ctx: InsertionContext) =
-        match ctx.ScopeKind with
-        | ScopeKind.Namespace when (getLineStr (ctx.Pos.Line - 1)).StartsWith("namespace", StringComparison.Ordinal) ->
-            Position.mkPos (ctx.Pos.Line + 1) ctx.Pos.Column
-        | ScopeKind.Namespace -> ctx.Pos
-        | _ -> ParsedInput.AdjustInsertionPoint getLineStr ctx
-
     let getOpenDeclarationChange (sourceText: SourceText) (ctx: InsertionContext) (declaration: string) : TextChange =
         let getLineStr line =
             if line >= 0 && line < sourceText.Lines.Count then
@@ -245,7 +238,7 @@ module internal OpenDeclarationHelper =
             else
                 ""
 
-        let pos = getInsertionPosition getLineStr ctx
+        let pos = ParsedInput.AdjustInsertionPoint getLineStr ctx
         let line = sourceText.Lines[min (Line.toZ pos.Line) (sourceText.Lines.Count - 1)]
 
         let lineBreakOf (line: TextLine) =

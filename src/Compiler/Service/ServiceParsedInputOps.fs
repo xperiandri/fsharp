@@ -158,7 +158,6 @@ type InsertionContextEntity =
         FullRelativeName: string
         Qualifier: string
         Namespace: string option
-        NamespaceIdentCount: int
         FullDisplayName: string
         LastIdent: ShortIdent
     }
@@ -284,18 +283,19 @@ module Entity =
                             else
                                 fullRelativeName
 
-                        Some
+                        let entity =
                             {
                                 FullRelativeName = formatIdents true fullRelativeName
                                 Qualifier = formatIdents (qualifier.Length = fullRelativeName.Length) qualifier
                                 Namespace = ns
-                                NamespaceIdentCount = (withoutQualifierWritten openableNs).Length
                                 FullDisplayName =
                                     match restIdents with
                                     | [| _ |] -> ""
                                     | _ -> formatIdents true restIdents
                                 LastIdent = Array.tryLast restIdents |> Option.defaultValue ""
-                            })
+                            }
+
+                        Some(struct (entity, (withoutQualifierWritten openableNs).Length)))
 
 module ParsedInput =
 
@@ -2440,11 +2440,22 @@ module ParsedInput =
             Kind: ScopeKind
         }
 
-    let tryFindNearestPointAndModules currentLine (ast: ParsedInput) (insertionPoint: OpenStatementInsertionPoint) =
+    let tryFindNearestPointAndModules (currentPos: pos) (ast: ParsedInput) (insertionPoint: OpenStatementInsertionPoint) =
         // We ignore all diagnostics during this operation
         //
         // Based on an initial review, no diagnostics should be generated.  However the code should be checked more closely.
         use _ignoreAllDiagnostics = new DiagnosticsScope(false)
+
+        let currentLine = currentPos.Line
+
+        let blockComments =
+            match ast with
+            | ParsedInput.ImplFile input ->
+                input.Trivia.CodeComments
+                |> List.choose (function
+                    | CommentTrivia.BlockComment range -> Some range
+                    | CommentTrivia.LineComment _ -> None)
+            | ParsedInput.SigFile _ -> []
 
         let mutable result = None
         let mutable ns = None
@@ -2507,6 +2518,14 @@ module ParsedInput =
                 | SynModuleDecl.HashDirective(range = r) -> ValueSome r.Start
                 | _ -> ValueNone
 
+        let rec skipTrailingBlockComments line =
+            match
+                blockComments
+                |> List.tryFind (fun comment -> comment.StartLine <= line && comment.EndLine > line)
+            with
+            | Some comment -> skipTrailingBlockComments comment.EndLine
+            | None -> line
+
         let headerEndLine (keyword: range) (ident: LongIdent) (equals: range option) =
             let nameEndLine =
                 ident
@@ -2514,6 +2533,12 @@ module ParsedInput =
 
             equals
             |> Option.fold (fun line equalsSign -> max line equalsSign.EndLine) nameEndLine
+            |> skipTrailingBlockComments
+
+        let bodyAnchor headerLine (firstDeclStart: pos voption) defaultColumn =
+            match firstDeclStart with
+            | ValueSome start when start.Line = headerLine -> struct (headerLine - 1, start.Column)
+            | _ -> struct (headerLine, defaultColumn)
 
         let rec walkImplFileInput (file: ParsedImplFileInput) =
             List.iter (walkSynModuleOrNamespace []) file.Contents
@@ -2535,11 +2560,14 @@ module ParsedInput =
 
                 let fullIdent = parent @ ident
 
-                let lineAboveBody =
+                let headerLine =
                     match trivia.LeadingKeyword with
                     | SynModuleOrNamespaceLeadingKeyword.Module keyword
                     | SynModuleOrNamespaceLeadingKeyword.Namespace keyword -> headerEndLine keyword ident None
                     | SynModuleOrNamespaceLeadingKeyword.None -> range.StartLine - 1
+
+                let struct (lineAboveBody, column) =
+                    bodyAnchor headerLine (tryGetFirstDeclStart decls) range.StartColumn
 
                 let scopeKind =
                     match isModule, parent with
@@ -2547,7 +2575,7 @@ module ParsedInput =
                     | true, _ -> NestedModule
                     | _ -> Namespace
 
-                doRange scopeKind fullIdent lineAboveBody range.StartColumn
+                doRange scopeKind fullIdent lineAboveBody column
                 addModule (fullIdent, range)
                 List.iter (walkSynModuleDecl fullIdent) decls
 
@@ -2573,23 +2601,17 @@ module ParsedInput =
                         |> ValueOption.map _.Column
                         |> ValueOption.defaultValue (range.StartColumn + 4)
 
-                    let bodyStartsOnHeaderLine =
-                        firstDeclStart |> ValueOption.exists (fun start -> start.Line = headerLine)
-
-                    let lineAboveBody =
-                        if bodyStartsOnHeaderLine then
-                            headerLine - 1
-                        else
-                            headerLine
+                    let struct (lineAboveBody, bodyColumn) =
+                        bodyAnchor headerLine firstDeclStart moduleBodyIndentation
 
                     let useMayBeInModuleAttribute =
-                        bodyStartsOnHeaderLine
-                        && currentLine = headerLine
+                        firstDeclStart
+                        |> ValueOption.exists (fun start -> start.Line = headerLine && posLt currentPos start)
                         && attributes
                            |> List.exists (fun attributeList -> attributeList.Range.EndLine = headerLine)
 
                     if headerLine <= currentLine && not useMayBeInModuleAttribute then
-                        doRange NestedModule fullIdent lineAboveBody moduleBodyIndentation
+                        doRange NestedModule fullIdent lineAboveBody bodyColumn
                         List.iter (walkSynModuleDecl fullIdent) decls
             | SynModuleDecl.Open(_, range) -> doRange OpenDeclaration [] range.EndLine (range.StartColumn - 5)
             | SynModuleDecl.HashDirective(_, range) -> doRange HashDirective [] range.EndLine range.StartColumn
@@ -2634,14 +2656,14 @@ module ParsedInput =
                         Pos = mkPos (Line.fromZ m.Range.EndLine) m.Range.StartColumn
                     })
 
-    let TryFindInsertionContext
-        (currentLine: int)
+    let TryFindInsertionContextAt
+        (currentPos: pos)
         (parsedInput: ParsedInput)
         (partiallyQualifiedName: MaybeUnresolvedIdent[])
         (insertionPoint: OpenStatementInsertionPoint)
         =
         let res, modules =
-            tryFindNearestPointAndModules currentLine parsedInput insertionPoint
+            tryFindNearestPointAndModules currentPos parsedInput insertionPoint
 
         let res =
             res
@@ -2684,9 +2706,22 @@ module ParsedInput =
                     )
 
                 entities
-                |> Array.map (fun e ->
+                |> Array.map (fun (struct (e, namespaceIdentCount)) ->
                     match find () with
-                    | struct (_, context) -> e, context)
+                    | struct (_, context) -> struct (e, context, namespaceIdentCount))
+
+    let TryFindInsertionContext
+        (currentLine: int)
+        (parsedInput: ParsedInput)
+        (partiallyQualifiedName: MaybeUnresolvedIdent[])
+        (insertionPoint: OpenStatementInsertionPoint)
+        =
+        let findAt =
+            TryFindInsertionContextAt (mkPos currentLine 0) parsedInput partiallyQualifiedName insertionPoint
+
+        fun candidate ->
+            findAt candidate
+            |> Array.map (fun (struct (entity, context, _)) -> entity, context)
 
     let AdjustInsertionPoint (getLineStr: int -> string) ctx =
         match ctx.ScopeKind with
@@ -2695,14 +2730,14 @@ module ParsedInput =
         | ScopeKind.NestedModule when getLineStr (Line.toZ ctx.Pos.Line) = "" -> mkPos (ctx.Pos.Line + 1) ctx.Pos.Column
         | _ -> ctx.Pos
 
-    let FindNearestPointToInsertOpenDeclaration
-        (currentLine: int)
+    let FindNearestPointToInsertOpenDeclarationAt
+        (currentPos: pos)
         (parsedInput: ParsedInput)
         (entity: ShortIdents)
         (insertionPoint: OpenStatementInsertionPoint)
         =
         let ctx =
-            match tryFindNearestPointAndModules currentLine parsedInput insertionPoint with
+            match tryFindNearestPointAndModules currentPos parsedInput insertionPoint with
             | Some(scope, _, point), modules ->
                 let struct (_, context) =
                     findBestPositionToInsertOpenDeclaration modules scope point entity
@@ -2754,3 +2789,11 @@ module ParsedInput =
             else
                 ctx
         | _ -> ctx
+
+    let FindNearestPointToInsertOpenDeclaration
+        (currentLine: int)
+        (parsedInput: ParsedInput)
+        (entity: ShortIdents)
+        (insertionPoint: OpenStatementInsertionPoint)
+        =
+        FindNearestPointToInsertOpenDeclarationAt (mkPos currentLine 0) parsedInput entity insertionPoint
