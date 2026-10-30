@@ -39,7 +39,7 @@ Write-Host "Checking whether running on Windows: $IsWindows"
 Write-Host "Repository path: $repo_path"
 
 [string] $script = if ($IsWindows) { Join-Path $repo_path "build.cmd" } else { Join-Path $repo_path "build.sh" }
-[string] $additional_arguments = if ($IsWindows) { "-noVisualStudio -ci -bootstrap" } else { "" }
+[string[]] $additional_arguments = if ($IsWindows) { "-noVisualStudio", "-ci", "-bootstrap", "-mt", "1" } else { "--mt", "true" }
 
 # Set environment variable to disable UpdateXlf target (not needed for IL verification)
 $env:UpdateXlfOnBuild = "false"
@@ -55,12 +55,13 @@ $env:PublishWindowsPdb = "false"
 [string] $default_tfm = "netstandard2.0"
 # Read product TFM from centralized source of truth via MSBuild
 [string] $product_tfm = (& (Join-Path $repo_path "eng/common/dotnet.ps1") msbuild (Join-Path $repo_path "eng/TargetFrameworks.props") --getProperty:FSharpNetCoreProductTargetFramework).Trim()
+[string] $fsharp_core_net_tfm = (& (Join-Path $repo_path "eng/common/dotnet.ps1") msbuild (Join-Path $repo_path "eng/TargetFrameworks.props") --getProperty:FSharpCoreShippedNetTargetFramework).Trim()
 
 [string] $artifacts_bin_path = Join-Path (Join-Path $repo_path "artifacts") "bin"
 
 # List projects to verify, with TFMs
 $projects = @{
-    "FSharp.Core" = @($default_tfm, "netstandard2.1")
+    "FSharp.Core" = @($default_tfm, "netstandard2.1", $fsharp_core_net_tfm)
     "FSharp.Compiler.Service" = @($default_tfm, $product_tfm)
 }
 
@@ -75,11 +76,7 @@ if ($LASTEXITCODE -ne 0) {
 # Run build script for each configuration (NOTE: We don't build Proto)
 foreach ($configuration in $configurations) {
     Write-Host "Building $configuration configuration..."
-    if ($additional_arguments) {
-        & $script -c $configuration $additional_arguments
-    } else {
-        & $script -c $configuration
-    }
+    & $script -c $configuration @additional_arguments
     if ($LASTEXITCODE -ne 0 -And $LASTEXITCODE -ne '') {
         Write-Host "Build failed for $configuration configuration (last exit code: $LASTEXITCODE)."
         exit 1

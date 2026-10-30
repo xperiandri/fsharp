@@ -9,12 +9,23 @@ open FSharp.Test.Compiler.Assertions.StructuredResultsAsserts
 
 module OffsideExceptions =
 
+    // https://github.com/dotnet/fsharp/issues/15171
+    // The closing '>' of a nested multiline type-argument list may align with the opening type name.
+    [<Theory; FileInlineData("MultilineNestedTypeArguments.fs")>]
+    let MultilineNestedTypeArguments compilation =
+        compilation
+        |> getCompilation
+        |> asFsx
+        |> typecheck
+        |> shouldSucceed
+        |> ignore
+
     // This test was automatically generated (moved from FSharpQA suite - Conformance/LexicalFiltering/Basic/OffsideExceptions)
     //<Expects status="success"></Expects>
     [<Theory; FileInlineData("InfixTokenPlusOne.fs")>]
     let InfixTokenPlusOne compilation =
         compilation
-        |> getCompilation 
+        |> getCompilation
         |> asFsx
         |> typecheck
         |> shouldSucceed
@@ -24,7 +35,7 @@ module OffsideExceptions =
     [<Theory; FileInlineData("RelaxWhitespace2.fs")>]
     let RelaxWhitespace2 compilation =
         compilation
-        |> getCompilation 
+        |> getCompilation
         |> asFsx
         |> withLangVersion80
         |> withOptions ["--nowarn:25"; "--nowarn:3886"] // Incomplete pattern matches on this expression.
@@ -35,7 +46,7 @@ module OffsideExceptions =
     [<Theory; FileInlineData("RelaxWhitespace2.fs")>]
     let RelaxWhitespace2_Warning25 compilation =
         compilation
-        |> getCompilation 
+        |> getCompilation
         |> asFsx
         |> withLangVersion80
         |> withOptions ["--nowarn:3886"]
