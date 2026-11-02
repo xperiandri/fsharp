@@ -1,5 +1,8 @@
 // Copyright (c) Microsoft Corporation.  All Rights Reserved.  See License.txt in the project root for license information.
 
+// Suppress FS3220: a scenario reads the items of a System.Tuple by name, as the queries it checks do
+#nowarn "3220"
+
 module FSharp.Core.UnitTests.Linq.QueryStructureScenarios
 
 open System
@@ -8,6 +11,37 @@ open System.Linq.Expressions
 
 type Compiled =
     static member Run(lambda: Expression<Func<int, int>>, argument: int) = lambda.Compile().Invoke argument
+/// A record whose member gives the record itself
+type SelfRecord =
+    { SelfN: int }
+    member x.Identity: obj = x
+
+/// A struct with a tuple in it
+[<Struct>]
+type StructPair = { SPair: int * int }
+
+/// A record with a struct in it
+type StructHolder = { Wrapped: StructPair }
+
+let private pairOf (x: StructPair) = x.SPair
+
+/// A record that is changed through any copy of the struct that holds it
+type SharedChild = { SharedId: int; mutable State: int }
+
+[<Struct>]
+type SharedHolder = { Child: SharedChild }
+
+let private changeThenRead (x: SharedHolder) (y: SharedHolder) =
+    x.Child.State <- 99
+    y.Child.State
+
+/// A tree is pinned with every block it has: one that goes from three to two is a change as well
+let private blocks count =
+    List.replicate count (Violation.Statement System.Linq.Expressions.ExpressionType.Block)
+
+let private quotedLambda =
+    [ Violation.RuntimeHelperCall "LeafExpressionConverter.QuotationToLambdaExpression"
+      Violation.RuntimeHelperCall "LeafExpressionConverter.SubstHelper" ]
 
 let private nested operators =
     operators |> List.map Violation.NestedInCollectionSelector
@@ -324,50 +358,42 @@ let private finalProjections () =
           "tuple selected after where"
           (fun db -> query { for c in db.Customers do where (c.Age > 26); select (c.Id, c.Name) })
           (customers >> Seq.filter (fun c -> c.Age > 26) >> Seq.map (fun c -> c.Id, c.Name))
-      |> Scenario.flat [ "Where"; "Select" ]
 
       Scenario.rows
           "struct tuple selected after where"
           (fun db -> query { for c in db.Customers do where (c.Age > 26); select (struct (c.Id, c.Name)) })
           (customers >> Seq.filter (fun c -> c.Age > 26) >> Seq.map (fun c -> struct (c.Id, c.Name)))
-      |> Scenario.flat [ "Where"; "Select" ]
 
       Scenario.rows
           "record selected after sortBy"
           (fun db -> query { for c in db.Customers do sortBy c.Age; select { PersonName = c.Name; PersonAge = c.Age } })
           (customers >> Seq.sortBy _.Age >> Seq.map (fun c -> { PersonName = c.Name; PersonAge = c.Age }))
       |> Scenario.ordered
-      |> Scenario.flat [ "OrderBy"; "Select" ]
 
       Scenario.rows
           "anonymous record selected after join"
           (fun db -> query { for c in db.Customers do join o in db.Orders on (c.Id = o.CustomerId); select {| Name = c.Name; Total = o.Total |} })
           (fun data -> seq { for c in data.Customers do for o in c.Orders -> {| Name = c.Name; Total = o.Total |} })
-      |> Scenario.flat [ "Join"; "Select"; "Select" ]
 
       Scenario.rows
           "nested tuple selected"
           (fun db -> query { for c in db.Customers do select ((c.Id, c.Name), c.Age) })
           (customers >> Seq.map (fun c -> (c.Id, c.Name), c.Age))
-      |> Scenario.flat [ "Select" ]
 
       Scenario.rows
           "tuple of nine selected"
           (fun db -> query { for c in db.Customers do select (c.Id, c.Name, c.City, c.Age, c.Id + 100, c.Name.Length, c.Age * 2, c.Id * 7, c.Age - c.Id) })
           (customers >> Seq.map (fun c -> c.Id, c.Name, c.City, c.Age, c.Id + 100, c.Name.Length, c.Age * 2, c.Id * 7, c.Age - c.Id))
-      |> Scenario.flat [ "Select" ]
 
       Scenario.rows
           "tuple selected after groupBy"
           (fun db -> query { for c in db.Customers do groupBy c.City into g; select (g.Key, g.Count()) })
           (customers >> Seq.countBy _.City)
-      |> Scenario.flat [ "GroupBy"; "Select" ]
 
       Scenario.rows
           "tuple selected before distinct"
           (fun db -> query { for c in db.Customers do select (c.City, c.Age > 26); distinct })
           (customers >> Seq.map (fun c -> c.City, c.Age > 26) >> Seq.distinct)
-      |> Scenario.flat [ "Select"; "Distinct"; "Select" ]
 
       Scenario.rows
           "sorted nested query of records selected in a tuple"
@@ -391,3 +417,109 @@ let private finalProjections () =
           (customers >> Seq.map (fun c -> c.Id, [| 10; 20 |] :> seq<int>) >> Seq.truncate 2) ]
 
 let cases () = loops () @ subqueries () @ leftJoins () @ finalProjections ()
+let private consumers () =
+    let totals (data: Data) = data.Orders |> List.map _.Total
+    let discounts (data: Data) = data.Lines |> List.filter _.Discount.HasValue |> List.map _.Discount.Value
+
+    [ Scenario.value
+          "all over two for"
+          (fun db -> query { for c in db.Customers do for o in c.Orders do all (o.Total > 4.0 || c.City = "Paris") })
+          (fun data -> data.Customers |> List.forall (fun c -> c.Orders |> Seq.forall (fun o -> o.Total > 4.0 || c.City = "Paris")))
+
+      Scenario.value "sumBy over two for" (fun db -> query { for c in db.Customers do for o in c.Orders do sumBy o.Total }) (totals >> List.sum)
+
+      Scenario.value
+          "averageBy after a join"
+          (fun db -> query { for c in db.Customers do join o in db.Orders on (c.Id = o.CustomerId); averageBy o.Total })
+          (totals >> List.average)
+
+      Scenario.value
+          "minByNullable over two for"
+          (fun db -> query { for o in db.Orders do for l in o.Lines do minByNullable l.Discount })
+          (discounts >> List.min >> System.Nullable)
+
+      Scenario.value
+          "sumByNullable after a join"
+          (fun db -> query { for o in db.Orders do join l in db.Lines on (o.Id = l.OrderId); sumByNullable l.Discount })
+          (discounts >> List.sum >> System.Nullable)
+
+      Scenario.value
+          "maxBy after a record select"
+          (fun db -> query { for c in db.Customers do select { PersonName = c.Name; PersonAge = c.Age } into p; maxBy p.PersonAge })
+          (fun data -> data.Customers |> List.map _.Age |> List.max)
+
+      Scenario.value
+          "exists after a record select"
+          (fun db -> query { for c in db.Customers do select { PersonName = c.Name; PersonAge = c.Age } into p; exists (p.PersonAge > 30) })
+          (fun _ -> true)
+
+      // A function that uses an element as a value of its own gets the one object the query produced
+      Scenario.value
+          "exists after a record select, the record compared with itself"
+          (fun db -> query { for c in db.Customers do select { PersonName = c.Name; PersonAge = c.Age } into p; exists (obj.ReferenceEquals(p, p)) })
+          (fun _ -> true)
+
+      // A member that is no field of the record gets the record itself
+      Scenario.value
+          "exists after a record select, a member of the record that gives the record itself"
+          (fun db -> query { for c in db.Customers do select { SelfN = c.Id } into p; exists (obj.ReferenceEquals(p.Identity, p.Identity)) })
+          (fun _ -> true)
+
+      Scenario.value
+          "exists after a record select, a struct in it with a tuple in it compared with itself"
+          (fun db ->
+              query {
+                  for c in db.Customers do
+                  select { Wrapped = { SPair = (c.Id, c.Age) } } into p
+                  exists (obj.ReferenceEquals(pairOf p.Wrapped, pairOf p.Wrapped))
+              })
+          (fun _ -> true)
+
+      // Copies of a struct hold the same objects
+      Scenario.value
+          "sumBy after a struct select, a record in it changed through the struct passed twice"
+          (fun db ->
+              query {
+                  for c in db.Customers do
+                  select { Child = { SharedId = c.Id; State = 0 } } into p
+                  sumBy (changeThenRead p p)
+              })
+          (fun data -> 99 * data.Customers.Length)
+
+      // A nested query that a function gets from the element is one sequence, however often it mentions it
+      Scenario.value
+          "exists with a nested query, the nested query compared with itself"
+          (fun db ->
+              query {
+                  for c in db.Customers do
+                  let orders = query { for o in db.Orders do where (o.CustomerId = c.Id); select (o.Id, o.Total) }
+                  exists (obj.ReferenceEquals(orders, orders))
+              })
+          (fun _ -> true)
+
+      Scenario.value
+          "all after a tuple select, the tuple compared with itself"
+          (fun db -> query { for c in db.Customers do select (c.Name, c.Age) into t; all (obj.ReferenceEquals(t, t)) })
+          (fun _ -> true)
+
+      Scenario.value
+          "sumBy after a tuple select, a tuple in it compared with itself"
+          (fun db ->
+              query {
+                  for c in db.Customers do
+                  select (c.Id, (c.Name, c.Age)) into t
+                  sumBy (if obj.ReferenceEquals(t.Item2, t.Item2) then 1 else 0)
+              })
+          (fun data -> data.Customers.Length)
+
+      Scenario.value
+          "exists after a tuple select"
+          (fun db -> query { for c in db.Customers do select (c.City, c.Age) into t; exists (match t with city, age -> city = "Paris" && age < 30) })
+          (fun _ -> true)
+
+      Scenario.value
+          "count after a tuple select"
+          (fun db -> query { for c in db.Customers do select (c.City, c.Age) into t; count })
+          (fun data -> data.Customers.Length)
+
+let cases () = loops () @ subqueries () @ leftJoins () @ consumers ()
