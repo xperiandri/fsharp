@@ -129,6 +129,17 @@ query { for p in db.Products do select (p.Id, p.Name) }
 // Now: Products.Select(p => new Tuple`2(p.Id, p.Name))
 ```
 
+After a `join`, a second `for` or a `groupBy` over tuples, the query no longer re-projects each element into a copy of itself, and a group used later in the query is read from the provider's grouping:
+
+```fsharp
+query { for c in db.Customers do join o in db.Orders on (c.Id = o.CustomerId); groupBy c.City into g; select (g.Key, g.Count()) }
+// Was: ...Join(..).Select(_arg1 => new AnonymousObject`2(Item1 = _arg1.Item1, Item2 = _arg1.Item2)).GroupBy(..)
+//        .Select(_arg2 => new Grouping`2(_arg2.Key, _arg2.Select(v => new Tuple`2(v.Item1, v.Item2)))).Select(g => ..g.Key..g.Count()..)
+// Now: ...Join(..).GroupBy(..).Select(g => new AnonymousObject`2(Item1 = g.Key, Item2 = g.Count()))
+```
+
+**Impact:** A group of tuples or records that a query uses as a value in the middle of a query, for example one that is passed on whole to a later `select` or `where`, is rebuilt from the provider's grouping by `RebuiltGroupings.Of`, so that it stays one object in every operator that mentions it. linq2db, which built such a group on the client, cannot be handed the grouping itself and no longer translates that call: such a query no longer translates with linq2db. EF Core cannot translate the call either where the group goes into a `select` beside another value: `groupValBy (c.Name, c.Age) c.City into g; let n = g.Count(); select (g, n)` ran with the groups rebuilt in the middle of the query and now fails with "Translation of 'Select' which contains grouping parameter without composition is not supported". The same holds after a `join`, after two `for`s, and with a record as the element. Reading the key of a group, or counting, summing, averaging or searching it, is not affected: those read the provider's grouping.
+
 ---
 
 ## FCS API: Query Variables 🟢
