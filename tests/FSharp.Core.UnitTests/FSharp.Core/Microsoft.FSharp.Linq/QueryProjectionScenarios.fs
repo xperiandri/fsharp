@@ -74,7 +74,17 @@ let cases () =
                   select name
               })
           (customers >> Seq.filter (fun c -> c.Id > 1) >> Seq.map _.Name)
-      |> Scenario.violating [ Violation.ReadsUnnamedMember "Tuple`2" ]
+
+      // The provider has to know which column of the tuple is the city, or it applies DISTINCT to both
+      Scenario.rows
+          "distinct of an item of a tuple taken apart by the next for"
+          (fun db ->
+              query {
+                  for (city, _) in (query { for c in db.Customers do select (c.City, c.Id) }) do
+                  select city
+                  distinct
+              })
+          (customers >> Seq.map _.City >> Seq.distinct)
 
       Scenario.rows
           "struct tuple taken apart by the next for"
@@ -85,7 +95,37 @@ let cases () =
                   select name
               })
           (customers >> Seq.filter (fun c -> c.Id > 1) >> Seq.map _.Name)
-      |> Scenario.violating [ Violation.ReadsUnnamedMember "ValueTuple`2" ]
+
+      Scenario.rows
+          "tuple of nine taken apart by the next for"
+          (fun db ->
+              query {
+                  for (_, name, _, _, _, _, _, _, last) in
+                      (query { for c in db.Customers do select (c.Id, c.Name, c.City, c.Age, c.Id, c.Name, c.City, c.Age, c.Id) }) do
+                  where (last > 1)
+                  select name
+              })
+          (customers >> Seq.filter (fun c -> c.Id > 1) >> Seq.map _.Name)
+
+      Scenario.rows
+          "record read by the next for"
+          (fun db ->
+              query {
+                  for p in (query { for c in db.Customers do select { PersonName = c.Name; PersonAge = c.Age } }) do
+                  where (p.PersonAge > 26)
+                  select p.PersonName
+              })
+          (customers >> Seq.filter (fun c -> c.Age > 26) >> Seq.map _.Name)
+
+      Scenario.rows
+          "anonymous record read by the next for"
+          (fun db ->
+              query {
+                  for p in (query { for c in db.Customers do select {| Age = c.Age; Name = c.Name |} }) do
+                  where (p.Age > 26)
+                  select p.Name
+              })
+          (customers >> Seq.filter (fun c -> c.Age > 26) >> Seq.map _.Name)
 
       Scenario.rows
           "record, fields in declaration order"
