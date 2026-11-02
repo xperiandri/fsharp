@@ -416,7 +416,6 @@ let private finalProjections () =
           (fun db -> query { for c in db.Customers do select (c.Id, query { for y in [| 20; 10 |] do sortBy y }); take 2 })
           (customers >> Seq.map (fun c -> c.Id, [| 10; 20 |] :> seq<int>) >> Seq.truncate 2) ]
 
-let cases () = loops () @ subqueries () @ leftJoins () @ finalProjections ()
 let private consumers () =
     let totals (data: Data) = data.Orders |> List.map _.Total
     let discounts (data: Data) = data.Lines |> List.filter _.Discount.HasValue |> List.map _.Discount.Value
@@ -464,6 +463,7 @@ let private consumers () =
           "exists after a record select, a member of the record that gives the record itself"
           (fun db -> query { for c in db.Customers do select { SelfN = c.Id } into p; exists (obj.ReferenceEquals(p.Identity, p.Identity)) })
           (fun _ -> true)
+      |> Scenario.violating [ Violation.ReadsUnnamedMember "SelfRecord" ]
 
       Scenario.value
           "exists after a record select, a struct in it with a tuple in it compared with itself"
@@ -474,6 +474,7 @@ let private consumers () =
                   exists (obj.ReferenceEquals(pairOf p.Wrapped, pairOf p.Wrapped))
               })
           (fun _ -> true)
+      |> Scenario.violating [ Violation.ReadsUnnamedMember "StructHolder" ]
 
       // Copies of a struct hold the same objects
       Scenario.value
@@ -496,6 +497,7 @@ let private consumers () =
                   exists (obj.ReferenceEquals(orders, orders))
               })
           (fun _ -> true)
+      |> Scenario.violating [ Violation.ReadsUnnamedMember "Tuple`2" ]
 
       Scenario.value
           "all after a tuple select, the tuple compared with itself"
@@ -511,15 +513,18 @@ let private consumers () =
                   sumBy (if obj.ReferenceEquals(t.Item2, t.Item2) then 1 else 0)
               })
           (fun data -> data.Customers.Length)
+      |> Scenario.violating [ Violation.ReadsUnnamedMember "Tuple`2" ]
 
       Scenario.value
           "exists after a tuple select"
           (fun db -> query { for c in db.Customers do select (c.City, c.Age) into t; exists (match t with city, age -> city = "Paris" && age < 30) })
           (fun _ -> true)
+      |> Scenario.violating (blocks 2)
 
       Scenario.value
           "count after a tuple select"
           (fun db -> query { for c in db.Customers do select (c.City, c.Age) into t; count })
           (fun data -> data.Customers.Length)
+      |> Scenario.flat [ "Select"; "Select"; "Count" ] ]
 
-let cases () = loops () @ subqueries () @ leftJoins () @ consumers ()
+let cases () = loops () @ subqueries () @ leftJoins () @ finalProjections () @ consumers ()
