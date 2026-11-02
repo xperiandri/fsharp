@@ -392,7 +392,6 @@ let private groupings () =
                   select (g.Key, g.Count(fun x -> obj.ReferenceEquals(x.Pair, x.Pair)))
               })
           (customers >> Seq.countBy _.City)
-      |> Scenario.violating [ Violation.ReadsUnnamedMember "PairHolder" ]
 
       Scenario.rows
           "groupValBy a tuple, a record in it compared with itself"
@@ -403,7 +402,6 @@ let private groupings () =
                   select (g.Key, g.Count(fun (_, p) -> p = p))
               })
           (customers >> Seq.countBy _.City)
-      |> Scenario.violating [ Violation.ReadsUnnamedMember "Tuple`2" ]
 
       // The group goes into the result beside another value: the provider is handed the grouping it made
       Scenario.rows
@@ -491,7 +489,6 @@ let private groupings () =
                let found = seq { for o in c.Orders do for o2 in c.Orders -> o, o2 } |> Seq.find (fun (o, o2) -> o.Id < o2.Id)
 
                c.Name, (fst found).Id))
-      |> Scenario.violating [ Violation.ReadsUnnamedMember "Tuple`2"; Violation.RuntimeHelperCall "Operators.Fst" ]
 
       // A member that is no field of the record gives the record the rebuilding made for it, so it is a use of the whole
       Scenario.rows
@@ -503,7 +500,6 @@ let private groupings () =
                   select (g.Key, g.Count(fun x -> obj.ReferenceEquals(x.Identity, x.Identity)))
               })
           (customers >> Seq.countBy _.City)
-      |> Scenario.violating [ Violation.ReadsUnnamedMember "SelfHolder" ]
 
       Scenario.rows
           "groupValBy a record, a struct in it with a tuple in it compared with itself"
@@ -514,7 +510,6 @@ let private groupings () =
                   select (g.Key, g.Count(fun x -> obj.ReferenceEquals(pairOf x.Wrapped, pairOf x.Wrapped)))
               })
           (customers >> Seq.countBy _.City)
-      |> Scenario.violating [ Violation.ReadsUnnamedMember "StructHolder" ]
 
       Scenario.rows
           "groupValBy a tuple, a tuple in it compared with itself"
@@ -525,7 +520,6 @@ let private groupings () =
                   select (g.Key, g.Count(fun (_, inner) -> obj.ReferenceEquals(inner, inner)))
               })
           (customers >> Seq.countBy _.City)
-      |> Scenario.violating [ Violation.ReadsUnnamedMember "Tuple`2" ]
 
       Scenario.rows
           "find among the groups of a nested query"
