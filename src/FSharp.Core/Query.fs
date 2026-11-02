@@ -986,9 +986,26 @@ module Query =
 
         | _ -> None
 
+    let (|CallFst|_|) = (|SpecificCallToMethod|_|) (methodhandleof (fun (x: int * int) -> fst x))
+
+    let (|CallSnd|_|) = (|SpecificCallToMethod|_|) (methodhandleof (fun (x: int * int) -> snd x))
+
+    /// A variable, or a tuple taken from one: what the query translation replaces by the tuple it rebuilds
+    [<return: Struct>]
+    let rec (|TupleOfVariable|_|) (expr: Expr) =
+        match expr with
+        | Var _ -> ValueSome ()
+        | TupleGet (TupleOfVariable, _) -> ValueSome ()
+        | _ -> ValueNone
+
     let (|MacroReduction|_|) (p: Expr) =
 
         match p with
+        // Macro - fst and snd read the tuple, so that a tuple the query translator rebuilds is read directly.
+        // A tuple that the query writes itself keeps all its items, as it evaluates every one of them.
+        | CallFst (None, _, [TupleOfVariable & tuple]) -> Some (Expr.TupleGet (tuple, 0))
+        | CallSnd (None, _, [TupleOfVariable & tuple]) -> Some (Expr.TupleGet (tuple, 1))
+
         | Applications(Lambdas(vs, body), args)
             when vs.Length = args.Length
                  && (vs, args) ||> List.forall2 (fun vs args -> vs.Length = args.Length) ->

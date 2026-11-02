@@ -20,6 +20,7 @@ type QueryShapeTests() =
     static member Keys = rows (QueryKeyScenarios.cases ())
     static member Structures = rows (QueryStructureScenarios.cases ())
     static member MethodSyntax = rows (QueryMethodSyntaxScenarios.cases ())
+    static member FSharpOperators = rows (QueryFSharpOperatorScenarios.cases ())
 
     [<Theory; MemberData(nameof QueryShapeTests.Projections)>]
     member _.Projection(scenario: Scenario) = Scenario.check scenario
@@ -35,6 +36,9 @@ type QueryShapeTests() =
 
     [<Theory; MemberData(nameof QueryShapeTests.MethodSyntax)>]
     member _.``Method syntax``(scenario: Scenario) = Scenario.check scenario
+
+    [<Theory; MemberData(nameof QueryShapeTests.FSharpOperators)>]
+    member _.``F# operator``(scenario: Scenario) = Scenario.check scenario
 
 /// Selectors that an expression gives when it is run, as the compiler turns a lambda nested in a lambda into a call
 type ComputedSelectors =
