@@ -157,6 +157,53 @@ module ProviderShape =
             | "GroupJoin" -> true
             | _ -> false)
 
+    /// Finds what keeps a provider from computing an expression before it translates: a parameter, a lambda, a
+    /// query, a statement, or a value that is different every time it is asked for.
+    type private TranslatedPartFinder() =
+        inherit ExpressionVisitor()
+
+        member val Found = false with get, set
+
+        override this.VisitLambda<'T>(node: Expression<'T>) =
+            this.Found <- true
+            node
+
+        override this.VisitParameter node =
+            this.Found <- true
+            node
+
+        override this.VisitMember node =
+            let owner = node.Member.DeclaringType
+
+            if
+                (owner = typeof<DateTime> || owner = typeof<DateTimeOffset>)
+                && (node.Member.Name = "Now" || node.Member.Name = "UtcNow" || node.Member.Name = "Today")
+            then
+                this.Found <- true
+
+            base.VisitMember node
+
+        override this.VisitMethodCall node =
+            if node.Method.DeclaringType = typeof<Guid> && node.Method.Name = "NewGuid" then
+                this.Found <- true
+
+            base.VisitMethodCall node
+
+        override this.Visit node =
+            match node with
+            | null -> null
+            | node ->
+                if isStatement node.NodeType || typeof<IQueryable>.IsAssignableFrom node.Type then
+                    this.Found <- true
+
+                base.Visit node
+
+    /// A provider computes such an expression before it translates, as it does a captured value.
+    let private isComputedByProvider (node: Expression) =
+        let finder = TranslatedPartFinder()
+        finder.Visit node |> ignore
+        not finder.Found
+
     type private ShapeVisitor() =
         inherit ExpressionVisitor()
 
@@ -233,13 +280,28 @@ module ProviderShape =
             base.VisitNew node
 
         override this.VisitMethodCall node =
-            if node.Method.DeclaringType.Assembly = fsharpCore then
+            let inFSharpCore = node.Method.DeclaringType.Assembly = fsharpCore
+            // Whatever a call the provider computes holds is run, not translated
+            let computed = isComputedByProvider node
+
+            if inFSharpCore && not computed then
                 found.Add(Violation.RuntimeHelperCall $"{node.Method.DeclaringType.Name}.{node.Method.Name}")
 
             if collectionSelectorDepth > 0 && flattensOrJoins node then
                 found.Add(Violation.NestedInCollectionSelector node.Method.Name)
 
-            if isLinqOperator node && node.Method.Name = "SelectMany" then
+            if computed then
+                // A lambda it gives is then part of what the provider translates
+                if typeof<Expression>.IsAssignableFrom node.Type then
+                    try
+                        match Expression.Lambda(node).Compile().DynamicInvoke() with
+                        | :? Expression as produced -> this.Visit produced |> ignore
+                        | _ -> ()
+                    with error ->
+                        found.Add(Violation.Throws(error.GetBaseException().GetType().Name))
+
+                node
+            elif isLinqOperator node && node.Method.Name = "SelectMany" then
                 this.Visit node.Object |> ignore
                 this.Visit node.Arguments.[0] |> ignore
                 collectionSelectorDepth <- collectionSelectorDepth + 1
@@ -312,6 +374,20 @@ module ProviderShape =
         | :? ConstantExpression as root -> obj.ReferenceEquals(root.Value, query)
         | _ -> false
 
+    /// The lambda that a call gives when the provider computes it before it translates, as it does for a selector
+    /// that reads nothing of the tree: a nested lambda that the compiler turned into a call. Nothing, if the call
+    /// fails.
+    let private computedLambda (node: Expression) =
+        if typeof<LambdaExpression>.IsAssignableFrom node.Type && isComputedByProvider node then
+            try
+                match Expression.Lambda(node).Compile().DynamicInvoke() with
+                | :? LambdaExpression as lambda -> ValueSome lambda
+                | _ -> ValueNone
+            with _ ->
+                ValueNone
+        else
+            ValueNone
+
     /// Finds members read from elements that an earlier operator built without naming them: the provider has to
     /// take apart an object it was not told how to. Every chain of operators is followed, the ones inside lambdas
     /// and the ones of a query captured from earlier too, and each parameter of a lambda is tied to the sequence
@@ -328,6 +404,7 @@ module ProviderShape =
             if index < call.Arguments.Count then
                 match call.Arguments.[index] with
                 | Lambda lambda -> ValueSome lambda
+                | :? MethodCallExpression as computed -> computedLambda computed
                 | _ -> ValueNone
             else
                 ValueNone
@@ -470,6 +547,11 @@ module ProviderShape =
         override this.VisitMethodCall node =
             if isLinqOperator node then
                 this.Check node
+
+            // The lambda such a call gives is part of what the provider translates
+            match computedLambda node with
+            | ValueSome lambda -> this.Visit lambda |> ignore
+            | ValueNone -> ()
 
             base.VisitMethodCall node
 
