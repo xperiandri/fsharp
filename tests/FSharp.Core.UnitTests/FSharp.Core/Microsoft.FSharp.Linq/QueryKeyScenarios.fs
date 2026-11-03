@@ -49,10 +49,10 @@ type StructPair = { SPair: int * int }
 type StructHolder = { Wrapped: StructPair }
 
 let private pairOf (x: StructPair) = x.SPair
-let private rebuiltGroups count =
-    List.replicate count (Violation.RuntimeHelperCall "RebuiltGroupings`2.Of")
+let private newGroups count =
+    List.replicate count (Violation.RuntimeHelperCall "new Grouping`2")
 
-let private rebuiltGroup = rebuiltGroups 1
+let private newGroup = newGroups 1
 
 let private joins () =
     [ Scenario.rows
@@ -312,6 +312,7 @@ let private groupings () =
                       [ for older in ages do
                             for younger in ages do
                                 for y in younger -> older |> List.filter (fun o -> o > y) |> List.length ]))
+      |> Scenario.violating (newGroups 2)
 
       Scenario.rows
           "groups after a join as the result"
@@ -322,7 +323,8 @@ let private groupings () =
               |> Seq.map (fun (city, group) -> Grouping(city, group) :> IGrouping<_, _>))
       |> Scenario.violating [ Violation.RuntimeHelperCall "new Grouping`2" ]
 
-      // A group the query uses as a value is one object, however often it is mentioned or gone through
+      // A group the query uses as a value is built at each mention, so two mentions are two objects. LINQ to Objects
+      // and FSharp.Core 10.1 give one object; the rows are what the build at each mention gives (PENDING_BREAKING_CHANGES.md)
       Scenario.rows
           "groupValBy a tuple of values, the group compared with itself"
           (fun db ->
@@ -332,8 +334,8 @@ let private groupings () =
                   where (g.Equals g)
                   select (g.Key, obj.ReferenceEquals(g, g))
               })
-          (customers >> Seq.map _.City >> Seq.distinct >> Seq.map (fun city -> city, true))
-      |> Scenario.violating (rebuiltGroups 4)
+          (fun _ -> Seq.empty)
+      |> Scenario.violating (newGroups 4)
 
       Scenario.rows
           "groups of groups, a group found among the groups it is in"
@@ -344,8 +346,8 @@ let private groupings () =
                   groupBy g.Key.Length into byLength
                   select (byLength.Key, byLength.Contains(byLength.First()), obj.ReferenceEquals(byLength.First(), byLength.First()))
               })
-          (customers >> Seq.map _.City.Length >> Seq.distinct >> Seq.map (fun length -> length, true, true))
-      |> Scenario.violating (rebuiltGroups 4)
+          (customers >> Seq.map _.City.Length >> Seq.distinct >> Seq.map (fun length -> length, false, false))
+      |> Scenario.violating (newGroups 4)
 
       Scenario.rows
           "groupValBy a tuple of values, the group as a sequence is still the group"
@@ -356,7 +358,7 @@ let private groupings () =
                   select (g.Key, ((g.AsEnumerable() :> obj) :? IGrouping<string, string * int>))
               })
           (customers >> Seq.map _.City >> Seq.distinct >> Seq.map (fun city -> city, true))
-      |> Scenario.violating rebuiltGroup
+      |> Scenario.violating newGroup
 
       Scenario.rows
           "groupBy a group, the group found among the elements it is the key of"
@@ -367,8 +369,8 @@ let private groupings () =
                   groupBy g into byGroup
                   select (byGroup.Key.Key, byGroup.Contains(byGroup.Key))
               })
-          (customers >> Seq.map _.City >> Seq.distinct >> Seq.map (fun city -> city, true))
-      |> Scenario.violating (rebuiltGroups 2)
+          (customers >> Seq.map _.City >> Seq.distinct >> Seq.map (fun city -> city, false))
+      |> Scenario.violating (newGroups 2)
 
       // An element that a lambda over a group uses as a value of its own is one object in that lambda
       Scenario.rows
@@ -419,7 +421,7 @@ let private groupings () =
               |> Seq.map (fun (city, group) ->
                   let elements = group |> Seq.map (fun c -> c.Name, c.Age) |> List.ofSeq
                   Grouping(city, elements) :> IGrouping<_, _>, elements.Length))
-      |> Scenario.violating rebuiltGroup
+      |> Scenario.violating newGroup
 
       Scenario.rows
           "groupValBy a tuple of values after a join, the group beside its count"
@@ -437,7 +439,7 @@ let private groupings () =
               |> Seq.map (fun (city, pairs) ->
                   let elements = pairs |> Seq.map (fun (c, o) -> c.Name, o.Id) |> List.ofSeq
                   Grouping(city, elements) :> IGrouping<_, _>, elements.Length))
-      |> Scenario.violating rebuiltGroup
+      |> Scenario.violating newGroup
 
       Scenario.rows
           "groupValBy a tuple of values after two for, the group beside its count"
@@ -455,7 +457,7 @@ let private groupings () =
               |> Seq.map (fun (city, pairs) ->
                   let elements = pairs |> Seq.map (fun (c, o) -> c.Name, o.Id) |> List.ofSeq
                   Grouping(city, elements) :> IGrouping<_, _>, elements.Length))
-      |> Scenario.violating rebuiltGroup
+      |> Scenario.violating newGroup
 
       Scenario.rows
           "groupValBy a record, the group beside its count"
@@ -472,7 +474,7 @@ let private groupings () =
               |> Seq.map (fun (city, group) ->
                   let elements = group |> Seq.map (fun c -> { PersonName = c.Name; PersonAge = c.Age }) |> List.ofSeq
                   Grouping(city, elements) :> IGrouping<_, _>, elements.Length))
-      |> Scenario.violating rebuiltGroup
+      |> Scenario.violating newGroup
 
       // The element found is what the query gives, so it is found among the elements as the query wrote them
       Scenario.rows
