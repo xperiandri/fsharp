@@ -479,7 +479,7 @@ type ProviderShapeValidatorTests() =
                         })
                     (fun data -> data.Customers.[0])
 
-            Scenario.failures scenario |> List.exists (fun failure -> failure.Contains("rows: expected", StringComparison.Ordinal))
+            Scenario.failures scenario |> List.exists (fun failure -> failure.IndexOf("rows: expected", StringComparison.Ordinal) >= 0)
 
         let copy (c: Customer) = Customer(Id = c.Id, Name = c.Name, City = c.City, Age = c.Age, Registered = c.Registered)
 
