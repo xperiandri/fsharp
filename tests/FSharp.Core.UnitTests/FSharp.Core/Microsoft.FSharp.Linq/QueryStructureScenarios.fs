@@ -499,7 +499,7 @@ let private consumers () =
                   exists (obj.ReferenceEquals(groups, groups))
               })
           (fun _ -> true)
-      |> Scenario.violating [ Violation.RuntimeHelperCall "new Grouping`2"; Violation.ReadsUnnamedMember "Tuple`2" ]
+      |> Scenario.violating [ Violation.RuntimeHelperCall "new Grouping`2" ]
 
       Scenario.value
           "exists with a nested query of struct tuples, the nested query compared with itself"
@@ -510,7 +510,6 @@ let private consumers () =
                   exists (obj.ReferenceEquals(orders, orders))
               })
           (fun _ -> true)
-      |> Scenario.violating [ Violation.ReadsUnnamedMember "Tuple`2" ]
 
       Scenario.value
           "all after a tuple select, the tuple compared with itself"
