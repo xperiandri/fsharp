@@ -443,7 +443,7 @@ module Query =
 
     /// Project F# function expressions to Linq LambdaExpression nodes
     let FuncExprToLinqFunc2Expression (srcTy, targetTy, v, body) =
-        FuncExprToDelegateExpr(srcTy, targetTy, v, body) |> QuotationToExpression
+        FuncExprToDelegateExpr(srcTy, targetTy, v, body) |> MakeImplicitExpressionConversion |> QuotationToExpression
 
     let FuncExprToLinqFunc2 (srcTy, targetTy, v, body) =
         FuncExprToDelegateExpr(srcTy, targetTy, v, body) |> EvaluateQuotation
@@ -986,9 +986,26 @@ module Query =
 
         | _ -> None
 
+    let (|CallFst|_|) = (|SpecificCallToMethod|_|) (methodhandleof (fun (x: int * int) -> fst x))
+
+    let (|CallSnd|_|) = (|SpecificCallToMethod|_|) (methodhandleof (fun (x: int * int) -> snd x))
+
+    /// A variable, or a tuple taken from one: what the query translation replaces by the tuple it rebuilds
+    [<return: Struct>]
+    let rec (|TupleOfVariable|_|) (expr: Expr) =
+        match expr with
+        | Var _ -> ValueSome ()
+        | TupleGet (TupleOfVariable, _) -> ValueSome ()
+        | _ -> ValueNone
+
     let (|MacroReduction|_|) (p: Expr) =
 
         match p with
+        // Macro - fst and snd read the tuple, so that a tuple the query translator rebuilds is read directly.
+        // A tuple that the query writes itself keeps all its items, as it evaluates every one of them.
+        | CallFst (None, _, [TupleOfVariable & tuple]) -> Some (Expr.TupleGet (tuple, 0))
+        | CallSnd (None, _, [TupleOfVariable & tuple]) -> Some (Expr.TupleGet (tuple, 1))
+
         | Applications(Lambdas(vs, body), args)
             when vs.Length = args.Length
                  && (vs, args) ||> List.forall2 (fun vs args -> vs.Length = args.Length) ->
@@ -1154,10 +1171,12 @@ module Query =
 
     /// Given an expression involving mutable tuples logically corresponding to a "yield" or "select" with the given
     /// immutable-to-mutable conversion information, convert it back to an expression involving immutable tuples or records.
+    ///
     let rec ConvMutableToImmutable conv mutExpr =
         match conv with
-        | TupleConv convs ->
-            Expr.NewTuple (convs |> List.mapi (fun i conv -> ConvMutableToImmutable conv (AnonymousObjectGet (mutExpr, i))))
+        | TupleConv (isStruct, convs) ->
+            let elements = convs |> List.mapi (fun i conv -> ConvMutableToImmutable conv (AnonymousObjectGet (mutExpr, i)))
+            if isStruct then Expr.NewStructTuple elements else Expr.NewTuple elements
         | RecordConv (typ, convs) ->
             Expr.NewRecord (typ, convs |> List.mapi (fun i conv -> ConvMutableToImmutable conv (AnonymousObjectGet (mutExpr, i))))
 
@@ -1218,6 +1237,20 @@ module Query =
 
         let mutConsumingExpr = SimplifyConsumingExpr mutConsumingExprBeforeSimplification
         mutConsumingVar, mutConsumingExpr
+
+    /// Whether 'expr' is 'original' itself, or the elements of the tuple 'original' put back together in order.
+    let rec IsSameValue (original: Expr) (expr: Expr) =
+        match expr with
+        | NewTuple elements when Type.op_Equality(expr.Type, original.Type) ->
+            elements |> List.indexed |> List.forall (fun (i, element) -> IsSameValue (Expr.TupleGet(original, i)) element)
+        | _ -> expr = original
+
+    /// A 'yield' or 'select' of the element itself hands converted elements on as the provider produced them,
+    /// rather than rebuilding each of them, and each grouping, in the middle of the query.
+    let YieldsConvertedElementItself sourceConv (immutVar: Var, immutBody: Expr) =
+        match sourceConv with
+        | NoConv -> false
+        | _ -> IsSameValue (Expr.Var immutVar) (MacroExpand immutBody)
 
     let (|AnyNestedQuery|_|) e =
         match e with
@@ -1300,6 +1333,9 @@ module Query =
             let rec TransFor mutSource immutSelector =
                 match immutSelector with
 
+                | CallQueryBuilderYield(_, _, immutSelectorBody) when YieldsConvertedElementItself sourceConv (immutSelectorVar, immutSelectorBody) ->
+                    mutSource, sourceConv
+
                 // query.For (source, (fun selectorVar -> yield res)) @>
                 //    ~~> TRANS(source.Select(selectorVar -> res)
                 | CallQueryBuilderYield(_, _, immutSelectorBody) ->
@@ -1365,11 +1401,14 @@ module Query =
 
         | CallSelect (_, [_; qTy; _], mutSource, Lambda(immutSelectorVar, immutSelectorBody)) ->
 
-            let mutSource, _sourceConv, mutSelectorVar, mutSelectorBody = TransInnerApplicative check mutSource (immutSelectorVar, immutSelectorBody)
-            let mutSelectorBody, selectorConv = ProduceMoreMutables TransInnerNoCheck mutSelectorBody
-            let mutSelectorBody = CleanupLeaf mutSelectorBody
+            let mutSource, sourceConv, mutSelectorVar, mutSelectorBody = TransInnerApplicative check mutSource (immutSelectorVar, immutSelectorBody)
+            if YieldsConvertedElementItself sourceConv (immutSelectorVar, immutSelectorBody) then
+                mutSource, sourceConv
+            else
+                let mutSelectorBody, selectorConv = ProduceMoreMutables TransInnerNoCheck mutSelectorBody
+                let mutSelectorBody = CleanupLeaf mutSelectorBody
 
-            TransInnerResult.MakeSelect(canElim, qTyIsIQueryable qTy, mutSource, mutSelectorVar, mutSelectorBody), selectorConv
+                TransInnerResult.MakeSelect(canElim, qTyIsIQueryable qTy, mutSource, mutSelectorVar, mutSelectorBody), selectorConv
 
         | CallQueryBuilderYieldFrom (_, _, [source]) -> TransInner canElim check source
 
@@ -1632,7 +1671,14 @@ module Query =
                 if (IQueryableTySpec.IsAssignableFrom replNestedQuery.Type) && not (Type.op_Equality(IQueryableTySpec, replNestedQuery.Type)) then
                     Expr.Coerce (replNestedQuery, IQueryableTySpec)
                 else
-                    replNestedQuery
+                    // likewise over a sequence: a nested query that ends in a sort is an IOrderedEnumerable
+                    let IEnumerableTySpec = MakeIEnumerableTy tyArg
+                    if not (IQueryableTySpec.IsAssignableFrom replNestedQuery.Type)
+                       && IEnumerableTySpec.IsAssignableFrom replNestedQuery.Type
+                       && not (Type.op_Equality(IEnumerableTySpec, replNestedQuery.Type)) then
+                        Expr.Coerce (replNestedQuery, IEnumerableTySpec)
+                    else
+                        replNestedQuery
             replNestedQuery, MakeSeqConv conv
         | _ ->
             e, NoConv
@@ -1645,9 +1691,18 @@ module Query =
         let mutInnerKeyVar, mutInnerKeySelector = ConvertImmutableConsumerToMutableConsumer innerSourceConv (immutInnerKeyVar, MacroExpand immutInnerKeySelector)
 
         // Keys may be composite tuples - convert them to be mutables. Note, if there is a tuple on one side, there must be a tuple on the other side.
-        let mutOuterKeySelector, _ = ProduceMoreMutables TransNone mutOuterKeySelector
+        let mutOuterKey, _ = ProduceMoreMutables TransNone mutOuterKeySelector
+        let mutInnerKey, _ = ProduceMoreMutables TransNone mutInnerKeySelector
+
+        // A key that one side builds and the other gets ready-made changes its type on one side only. Both keep
+        // the type they were written with then.
+        let mutOuterKeySelector, mutInnerKeySelector =
+            if mutOuterKey.Type = mutInnerKey.Type then
+                mutOuterKey, mutInnerKey
+            else
+                mutOuterKeySelector, mutInnerKeySelector
+
         let mutOuterKeySelector = CleanupLeaf mutOuterKeySelector
-        let mutInnerKeySelector, _ = ProduceMoreMutables TransNone mutInnerKeySelector
         let mutInnerKeySelector = CleanupLeaf mutInnerKeySelector
         mutOuterSource, outerSourceConv, mutInnerSource, innerSourceConv, mutOuterKeyVar, mutOuterKeySelector, mutInnerKeyVar, mutInnerKeySelector
 
@@ -1672,10 +1727,10 @@ module Query =
     /// in terms of LINQ operators, operating over mutable tuples. If necessary, also add a "postfix" in-memory transformation
     /// converting the data back to immutable tuples and records.
     let TransInnerWithFinalConsume canElim immutSource =
-        let mutSource, sourceConv = TransInnerAndCommit canElim true immutSource
+        let mutSource, sourceConv = TransInner canElim true immutSource
         match sourceConv with
         | NoConv ->
-            mutSource
+            CommitTransInnerResult mutSource
         | _ ->
             // This function is used with inputs of
             //     - QuerySource<_, _> (for operators like Min)
@@ -1686,14 +1741,33 @@ module Query =
                 assert immutSourceTy.IsGenericType
                 assert (IsQuerySourceTy immutSourceTy || IsIQueryableTy immutSourceTy || IsIEnumerableTy immutSourceTy)
                 immutSource.Type.GetGenericArguments().[0]
-            let immutVar = Var("after", immutSourceElemTy)
-            let mutVar, mutToImmutSelector = ConvertImmutableConsumerToMutableConsumer sourceConv (immutVar, Expr.Var immutVar)
             // Determine if we need to use IQueryable-preserving Select
             let mustReturnIQueryable =
                 IsQuerySourceTy immutSourceTy && qTyIsIQueryable (immutSourceTy.GetGenericArguments().[1]) ||
                 IsIQueryableTy immutSourceTy
+            match mutSource with
+            | TransInnerResult.Select(selectCanElim, isQTy, selectSource, selectVar, selectBody) when isQTy = mustReturnIQueryable ->
+                // The conversion reads the body once for each of its parts. The lets in front of the construction, which
+                // a record with fields written out of order has, stay in front of it, so that each is evaluated once.
+                let rec convertUnderLets body =
+                    match body with
+                    | Let(v, e, rest) -> Expr.Let(v, e, convertUnderLets rest)
+                    | _ -> ConvMutableToImmutable sourceConv body
+                MakeSelect(selectCanElim, isQTy, CommitTransInnerResult selectSource, selectVar, convertUnderLets selectBody)
+            | _ ->
+            let committed = CommitTransInnerResult mutSource
+            // What reads the elements of a join or a second 'for' used to be the lambda of the query's next
+            // operator, which the compiler names 'tupledArg'. Providers written for F# queries know those
+            // elements by that name, so the conversion bears it where it is the one to read them.
+            let name =
+                match committed with
+                | Call (_, source, _) when source.Name = "Select" -> "after"
+                | _ -> "tupledArg"
+
+            let immutVar = Var(name, immutSourceElemTy)
+            let mutVar, mutToImmutSelector = ConvertImmutableConsumerToMutableConsumer sourceConv (immutVar, Expr.Var immutVar)
             // Use Queryable.Select when source should be IQueryable to preserve query composition
-            MakeSelect(CanEliminate.Yes, mustReturnIQueryable, mutSource, mutVar, mutToImmutSelector)
+            MakeSelect(CanEliminate.Yes, mustReturnIQueryable, committed, mutVar, mutToImmutSelector)
 
     /// Like TransInnerApplicativeAndCommit but (a) assumes the query is nested and (b) throws away the conversion information,
     /// i.e. assumes that the function "(fun immutConsumingVar -> immutConsumingExpr)" is the only consumption of the query.
@@ -1773,9 +1847,10 @@ module Query =
             let source, v, predicate = TransNestedInnerWithConsumer source (v, predicate)
             MakeAll (qTyIsIQueryable qTy, source, v, predicate)
 
+        // The element found is what the query gives, so it is found among the elements as the query wrote them
         | CallFind (_, [_; qTy], source, Lambda(v, predicate)) ->
-            let source, v, predicate = TransNestedInnerWithConsumer source (v, predicate)
-            MakeFirstFind (qTyIsIQueryable qTy, source, v, predicate)
+            let source = TransInnerWithFinalConsume CanEliminate.Yes source
+            MakeFirstFind (qTyIsIQueryable qTy, source, v, MacroExpand predicate)
 
         | CallContains (_, [srcItemTy; qTy], source, valToFindExpr)         ->
             let source = TransInnerWithFinalConsume CanEliminate.Yes source
@@ -1835,29 +1910,102 @@ module Query =
 
         result
 
+    /// Whether the translation turns the elements of this type into anonymous objects, and builds them again from those:
+    /// tuples and records, of a class or of a struct, groups of such elements, and sequences of any of these. Only the
+    /// type arguments of the sequences and groups are followed, so that a type which holds a sequence of itself ends
+    /// the search at once.
+    let rec IsConvertedElement (ty: Type) =
+        Microsoft.FSharp.Reflection.FSharpType.IsTuple ty
+        || isPartiallyImmutableRecord ty
+        || ((IsIEnumerableTy ty || IsIQueryableTy ty) && IsConvertedElement (ty.GetGenericArguments().[0]))
+        || (ty.IsGenericType
+            && ty.GetGenericTypeDefinition() = typedefof<IGrouping<_, _>>
+            && IsConvertedElement (ty.GetGenericArguments().[1]))
+
+    /// A tuple or record of a class, which the translation builds anew from the elements it produces each time one
+    /// is asked for, and a sequence of converted elements, which it selects anew over those elements
+    let rec IsRebuiltObject (ty: Type) =
+        if ty.IsValueType then
+            // A struct holds an object that is rebuilt when one of its parts is one
+            (Microsoft.FSharp.Reflection.FSharpType.IsTuple ty
+             && Microsoft.FSharp.Reflection.FSharpType.GetTupleElements ty |> Array.exists IsRebuiltObject)
+            || (isPartiallyImmutableRecord ty
+                && Microsoft.FSharp.Reflection.FSharpType.GetRecordFields ty
+                   |> Array.exists (fun field -> IsRebuiltObject field.PropertyType))
+        else
+            Microsoft.FSharp.Reflection.FSharpType.IsTuple ty
+            || isPartiallyImmutableRecord ty
+            || ((IsIEnumerableTy ty || IsIQueryableTy ty) && IsConvertedElement (ty.GetGenericArguments().[0]))
+
+    /// Whether the property is a part of the record or tuple it is read from, and not a member that computes something
+    /// from it: such a member gets the object itself
+    let IsPartOf (owner: Type) (property: System.Reflection.PropertyInfo) =
+        if Microsoft.FSharp.Reflection.FSharpType.IsRecord owner then
+            Microsoft.FSharp.Reflection.FSharpType.GetRecordFields owner
+            |> Array.exists (fun field -> field.Name = property.Name)
+        else
+            Microsoft.FSharp.Reflection.FSharpType.IsTuple owner
+            && property.Name.StartsWith("Item", StringComparison.Ordinal)
+
+    /// Whether the expression uses the element, or a tuple or record in it, as a value of its own, and not only for
+    /// what it holds. Where the function is rewritten over the elements the translation produces, each such use
+    /// is an object of its own, and not the one object the element is.
+    let rec UsesWholeElement (element: Var) (expr: Expr) =
+        let rec readsPartOfElement (expr: Expr) =
+            match expr with
+            | Var used -> used = element
+            | TupleGet (inner, _) -> readsPartOfElement inner
+            | PropertyGet (Some inner, property, []) when IsPartOf inner.Type property -> readsPartOfElement inner
+            | _ -> false
+
+        if readsPartOfElement expr then
+            IsRebuiltObject expr.Type
+        else
+            match expr with
+            | ExprShape.ShapeVar _ -> false
+            | ExprShape.ShapeLambda (_, body) -> UsesWholeElement element body
+            | ExprShape.ShapeCombination (_, args) -> List.exists (UsesWholeElement element) args
+
+    /// Evaluate the inner core of a query whose elements a function consumes. The function is rewritten over the
+    /// elements as the query translation produces them, so they are not converted back to immutable tuples and
+    /// records for it. A function that uses an element as a value of its own gets the elements as they are.
+    let EvalNonNestedInnerWithConsumer (queryProducingSequence: Expr) (immutConsumingVar: Var, immutConsumingExpr: Expr) =
+        if UsesWholeElement immutConsumingVar immutConsumingExpr then
+            EvalNonNestedInner CanEliminate.Yes queryProducingSequence, immutConsumingVar, MacroExpand immutConsumingExpr
+        else
+            let mutSource, _, mutConsumingVar, mutConsumingExpr =
+                TransInnerApplicativeAndCommit true queryProducingSequence (immutConsumingVar, immutConsumingExpr)
+            EvaluateQuotation (EliminateNestedQueries mutSource), mutConsumingVar, mutConsumingExpr
+
+    /// Evaluate the inner core of a query whose elements are only counted, with the type of the elements as the
+    /// query translation produces them.
+    let EvalNonNestedInnerForCount (queryProducingSequence: Expr) (immutElemTy: Type) =
+        let mutSource, conv = TransInnerAndCommit CanEliminate.Yes true queryProducingSequence
+        EvaluateQuotation (EliminateNestedQueries mutSource), ConvImmutableTypeToMutableType conv immutElemTy
+
     /// Evaluate the outer calls of a query until the inner core that actually produces a sequence of results is reached.
     let rec EvalNonNestedOuter canElim (tm: Expr) =
         match tm with
 
-        | CallMinBy (_, [srcItemTy; qTy; keyItemTy], source, Lambda(v, valSelector)) ->
-            let sourcev = EvalNonNestedInner CanEliminate.Yes source
-            CallMinBy (qTyIsIQueryable qTy, srcItemTy, keyItemTy, sourcev, keyItemTy, v, MacroExpand valSelector)
+        | CallMinBy (_, [_; qTy; keyItemTy], source, Lambda(v, valSelector)) ->
+            let sourcev, v, valSelector = EvalNonNestedInnerWithConsumer source (v, valSelector)
+            CallMinBy (qTyIsIQueryable qTy, v.Type, keyItemTy, sourcev, keyItemTy, v, valSelector)
 
-        | CallMaxBy (_, [srcItemTy; qTy; keyItemTy], source, Lambda(v, valSelector)) ->
-            let sourcev = EvalNonNestedInner CanEliminate.Yes source
-            CallMaxBy (qTyIsIQueryable qTy, srcItemTy, keyItemTy, sourcev, keyItemTy, v, MacroExpand valSelector)
+        | CallMaxBy (_, [_; qTy; keyItemTy], source, Lambda(v, valSelector)) ->
+            let sourcev, v, valSelector = EvalNonNestedInnerWithConsumer source (v, valSelector)
+            CallMaxBy (qTyIsIQueryable qTy, v.Type, keyItemTy, sourcev, keyItemTy, v, valSelector)
 
-        | CallMinByNullable (_, [srcItemTy; qTy; keyItemTy ], source, Lambda(v, valSelector)) ->
-            let sourcev = EvalNonNestedInner CanEliminate.Yes source
-            CallMinByNullable  (qTyIsIQueryable qTy, srcItemTy, keyItemTy, sourcev, MakeNullableTy keyItemTy, v, MacroExpand valSelector)
+        | CallMinByNullable (_, [_; qTy; keyItemTy ], source, Lambda(v, valSelector)) ->
+            let sourcev, v, valSelector = EvalNonNestedInnerWithConsumer source (v, valSelector)
+            CallMinByNullable  (qTyIsIQueryable qTy, v.Type, keyItemTy, sourcev, MakeNullableTy keyItemTy, v, valSelector)
 
-        | CallMaxByNullable (_, [srcItemTy; qTy; keyItemTy ], source, Lambda(v, valSelector)) ->
-            let sourcev = EvalNonNestedInner CanEliminate.Yes source
-            CallMaxByNullable  (qTyIsIQueryable qTy, srcItemTy, keyItemTy, sourcev, MakeNullableTy keyItemTy, v, MacroExpand valSelector)
+        | CallMaxByNullable (_, [_; qTy; keyItemTy ], source, Lambda(v, valSelector)) ->
+            let sourcev, v, valSelector = EvalNonNestedInnerWithConsumer source (v, valSelector)
+            CallMaxByNullable  (qTyIsIQueryable qTy, v.Type, keyItemTy, sourcev, MakeNullableTy keyItemTy, v, valSelector)
 
         | CallCount (_, [srcItemTy; qTy], source) ->
-            let sourcev = EvalNonNestedInner CanEliminate.Yes source
-            CallCount          (qTyIsIQueryable qTy, srcItemTy, sourcev)
+            let sourcev, mutSrcItemTy = EvalNonNestedInnerForCount source srcItemTy
+            CallCount          (qTyIsIQueryable qTy, mutSrcItemTy, sourcev)
 
         | CallHead (_, [srcItemTy; qTy], source) ->
             let sourcev = EvalNonNestedInner CanEliminate.Yes source
@@ -1883,29 +2031,29 @@ module Query =
             let sourcev = EvalNonNestedInner CanEliminate.Yes source
             CallSingleOrDefault(qTyIsIQueryable qTy, srcItemTy, sourcev)
 
-        | CallAverageBy (qb, [srcItemTy; qTy; resTy], source, Lambda(v, valSelector)) ->
-            let sourcev = EvalNonNestedInner CanEliminate.Yes source
-            CallAverageBy        (qb, qTyIsIQueryable qTy, srcItemTy, resTy, sourcev, resTy, v, MacroExpand valSelector)
+        | CallAverageBy (qb, [_; qTy; resTy], source, Lambda(v, valSelector)) ->
+            let sourcev, v, valSelector = EvalNonNestedInnerWithConsumer source (v, valSelector)
+            CallAverageBy        (qb, qTyIsIQueryable qTy, v.Type, resTy, sourcev, resTy, v, valSelector)
 
-        | CallAverageByNullable (qb, [srcItemTy; qTy; resTyNoNullable], source, Lambda(v, valSelector)) ->
-            let sourcev = EvalNonNestedInner CanEliminate.Yes source
-            CallAverageByNullable(qb, qTyIsIQueryable qTy, srcItemTy, resTyNoNullable, sourcev, MakeNullableTy resTyNoNullable, v, MacroExpand valSelector)
+        | CallAverageByNullable (qb, [_; qTy; resTyNoNullable], source, Lambda(v, valSelector)) ->
+            let sourcev, v, valSelector = EvalNonNestedInnerWithConsumer source (v, valSelector)
+            CallAverageByNullable(qb, qTyIsIQueryable qTy, v.Type, resTyNoNullable, sourcev, MakeNullableTy resTyNoNullable, v, valSelector)
 
-        | CallSumBy (qb, [srcItemTy; qTy; resTy], source, Lambda(v, valSelector)) ->
-            let sourcev = EvalNonNestedInner CanEliminate.Yes source
-            CallSumBy (qb, qTyIsIQueryable qTy, srcItemTy, resTy, sourcev, resTy, v, MacroExpand valSelector)
+        | CallSumBy (qb, [_; qTy; resTy], source, Lambda(v, valSelector)) ->
+            let sourcev, v, valSelector = EvalNonNestedInnerWithConsumer source (v, valSelector)
+            CallSumBy (qb, qTyIsIQueryable qTy, v.Type, resTy, sourcev, resTy, v, valSelector)
 
-        | CallSumByNullable (qb, [srcItemTy; qTy; resTyNoNullable], source, Lambda(v, valSelector)) ->
-            let sourcev = EvalNonNestedInner CanEliminate.Yes source
-            CallSumByNullable (qb, qTyIsIQueryable qTy, srcItemTy, resTyNoNullable, sourcev, MakeNullableTy resTyNoNullable, v, MacroExpand valSelector)
+        | CallSumByNullable (qb, [_; qTy; resTyNoNullable], source, Lambda(v, valSelector)) ->
+            let sourcev, v, valSelector = EvalNonNestedInnerWithConsumer source (v, valSelector)
+            CallSumByNullable (qb, qTyIsIQueryable qTy, v.Type, resTyNoNullable, sourcev, MakeNullableTy resTyNoNullable, v, valSelector)
 
-        | CallExists (_, [srcItemTy; qTy], source, Lambda(v, predicate)) ->
-            let sourcev = EvalNonNestedInner CanEliminate.Yes source
-            CallAny (qTyIsIQueryable qTy, srcItemTy, sourcev, v, MacroExpand predicate)
+        | CallExists (_, [_; qTy], source, Lambda(v, predicate)) ->
+            let sourcev, v, predicate = EvalNonNestedInnerWithConsumer source (v, predicate)
+            CallAny (qTyIsIQueryable qTy, v.Type, sourcev, v, predicate)
 
-        | CallForAll (_, [srcItemTy; qTy], source, Lambda(v, predicate)) ->
-            let sourcev = EvalNonNestedInner CanEliminate.Yes source
-            CallAll (qTyIsIQueryable qTy, srcItemTy, sourcev, v, MacroExpand predicate)
+        | CallForAll (_, [_; qTy], source, Lambda(v, predicate)) ->
+            let sourcev, v, predicate = EvalNonNestedInnerWithConsumer source (v, predicate)
+            CallAll (qTyIsIQueryable qTy, v.Type, sourcev, v, predicate)
 
         | CallFind (_, [srcItemTy; qTy], source, Lambda(v, f)) ->
             let sourcev = EvalNonNestedInner CanEliminate.Yes source

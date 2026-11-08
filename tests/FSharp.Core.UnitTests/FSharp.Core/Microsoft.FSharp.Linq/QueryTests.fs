@@ -27,6 +27,10 @@ module TestData =
         { Id = 2; DeptName = "Marketing" }
     ]
 
+    /// A struct that holds a sequence of itself
+    [<Struct>]
+    type Node = { Children: seq<Node> }
+
     type Table1 = { Id1: int; Id2: int; Value1: string }
     type Table2 = { Id1: int; Id2: int; Value2: string }
 
@@ -42,9 +46,31 @@ module TestData =
         { Table2.Id1 = 4; Id2 = 40; Value2 = "Z" }
     ]
 
+    type PairedTable = { PairKey: int * int; PairValue: string }
+
+    let pairedData = [
+        { PairKey = (1, 10); PairValue = "P" }
+        { PairKey = (2, 20); PairValue = "Q" }
+        { PairKey = (4, 40); PairValue = "R" }
+    ]
+
 open TestData
 
 type QueryTupleJoinTests() =
+
+    [<Fact>]
+    member _.``Join of a key built on one side with a tuple property on the other``() =
+        let t1 = table1Data.AsQueryable()
+        let paired = pairedData.AsQueryable()
+
+        let result =
+            query {
+                for a in t1 do
+                join p in paired on ((a.Id1, a.Id2) = p.PairKey)
+                select (a.Value1, p.PairValue)
+            } |> Seq.toList
+
+        Assert.Equal<(string * string) list>([ ("A", "P"); ("B", "Q") ], result)
 
     [<Fact>]
     member _.``Inline tuple join returns correct matches - issue 7885``() =
@@ -495,3 +521,13 @@ type QueryHeadOrDefaultTests() =
         // The result is null (default for reference type tuple)
         // Accessing .Item1/.Item2 would cause NRE - this is the known issue
         Assert.True(obj.ReferenceEquals(null, result))
+
+type QueryRecursiveTypeTests() =
+
+    [<Fact>]
+    member _.``exists over a struct that holds a sequence of itself``() =
+        let empty = Queryable.AsQueryable Seq.empty<TestData.Node>
+        let single = Queryable.AsQueryable [ { TestData.Node.Children = Seq.empty } ]
+
+        Assert.False(query { for n in empty do exists (Seq.isEmpty n.Children) })
+        Assert.True(query { for n in single do exists (Seq.isEmpty n.Children) })
