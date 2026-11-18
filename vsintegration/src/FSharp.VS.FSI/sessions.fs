@@ -12,7 +12,7 @@ open System.Threading
 
 #nowarn "52" //  The value has been copied to ensure the original is not mutated by this operation
 
-// Cannot be DEBUG only since it is used by tests  
+// Cannot be DEBUG only since it is used by tests
 let mutable timeoutAppShowMessageOnTimeOut = true
 
 open Microsoft.FSharp.Control
@@ -23,21 +23,21 @@ open FSharp.Compiler.Interactive.CtrlBreakHandlers
 type internal EventWrapper() =
     let waitHandle = new ManualResetEvent(false)
     let guard = new obj()
-    
+
     let mutable disposed = false
-    
+
     member _.Set() =
         lock guard (fun () -> if not disposed then waitHandle.Set() |> ignore)
-    
+
     member _.Dispose() =
         lock guard (fun () -> disposed <- true; (waitHandle :> IDisposable).Dispose())
-    
+
     member _.WaitOne(timeout : int) =
         waitHandle.WaitOne(timeout, true)
-        
+
     interface IDisposable with
         member this.Dispose() = this.Dispose()
-    
+
 
 /// Run function application return Some (f x) or None if execution exceeds timeout (in ms).
 /// Exceptions raised by f x are caught and reported in DEBUG mode.
@@ -49,7 +49,7 @@ let timeoutApp _descr timeoutMS (f : 'a -> 'b) (arg:'a) =
             try
                 f arg |> Some
             with
-            | e -> 
+            | e ->
 #if DEBUG
                 if timeoutAppShowMessageOnTimeOut then
                     System.Windows.Forms.MessageBox.Show("[This message is DEBUG build only]\n\n" +
@@ -59,21 +59,42 @@ let timeoutApp _descr timeoutMS (f : 'a -> 'b) (arg:'a) =
                                                          "Remoting exceptions are to be expected on interrupt/intellisense calls made before that point.\n" +
                                                          "Context: " + _descr + "\n" +
                                                          "Exception: " + e.ToString()) |> ignore
-#endif             
+#endif
                 None
-        ev.Set() 
+        ev.Set()
     ) |> ignore
     ev.WaitOne(timeoutMS) |> ignore
     r
 
-module SessionsProperties = 
-    let mutable useAnyCpuVersion = true     // 64-bit by default
-    let mutable fsiUseNetCore = true        // NetCore by default
-    let mutable fsiArgs = "--optimize"
-    let mutable fsiShadowCopy = true
-    let mutable fsiDebugMode = false
-    let mutable fsiPreview = false
-    let ServerPrompt="SERVER-PROMPT>" + Environment.NewLine
+type InteractiveOptions =
+    { PreferAnyCpuVersion: bool
+      UseNetCore: bool
+      CommandLineArgs: string
+      ShadowCopy: bool
+      DebugMode: bool
+      Preview: bool }
+
+    static member Default =
+        { PreferAnyCpuVersion = true
+          UseNetCore = true
+          CommandLineArgs = "--optimize"
+          ShadowCopy = true
+          DebugMode = false
+          Preview = false }
+
+type SessionsProperties private () =
+    [<VolatileField>]
+    static let mutable current = InteractiveOptions.Default
+
+    static member Current = current
+    static member Update options = current <- options
+    static member useAnyCpuVersion = current.PreferAnyCpuVersion
+    static member fsiUseNetCore = current.UseNetCore
+    static member fsiArgs = current.CommandLineArgs
+    static member fsiShadowCopy = current.ShadowCopy
+    static member fsiDebugMode = current.DebugMode
+    static member fsiPreview = current.Preview
+    static member ServerPrompt = "SERVER-PROMPT>" + Environment.NewLine
 
 // This code pre-dates the events/object system.
 // Later: Tidy up.
@@ -82,37 +103,37 @@ exception SessionError of string
 /// Buffer messages up into a list of messages.
 /// Allow upto timeMS to pass.
 let bufferEvent timeMS (w : #IObservable<_>) =
-    let bufferedW,bufferedE = 
+    let bufferedW,bufferedE =
         let e = new Event<_>() in e.Trigger, e.Publish
 
     let batchSize = 2000
     // 'FIFO' buffer for messages
-    let buffer = System.Collections.Generic.LinkedList<ResizeArray<_>>() // queue of lists - every list contains up to 2000 elements - max size of batch to be processed 
+    let buffer = System.Collections.Generic.LinkedList<ResizeArray<_>>() // queue of lists - every list contains up to 2000 elements - max size of batch to be processed
 
     // drops existing content of the buffer
-    let flushBuffer() = 
-        lock buffer <| fun () -> 
+    let flushBuffer() =
+        lock buffer <| fun () ->
             buffer.Clear()
-    
+
     // adds item to one of slots
     // every slot can contain max 'batchSize' elements
-    let addToBuffer item = 
+    let addToBuffer item =
         lock buffer <| fun() ->
-            let slot = 
-                if buffer.Count = 0 || buffer.First.Value.Count = batchSize then 
+            let slot =
+                if buffer.Count = 0 || buffer.First.Value.Count = batchSize then
                     let slot = ResizeArray(batchSize)
                     buffer.AddFirst slot |> ignore
                     slot
-                else 
+                else
                     buffer.First.Value
             slot.Add item
-    
+
     // run the processing of the accumulated data in one slot
-    let processBatch() = 
-        let messages = 
+    let processBatch() =
+        let messages =
             lock buffer <| fun() ->
                 if buffer.Count = 0 then None
-                else 
+                else
                     let batch = buffer.Last
                     buffer.RemoveLast()
                     Some batch.Value
@@ -120,7 +141,7 @@ let bufferEvent timeMS (w : #IObservable<_>) =
         | None -> ()
         | Some batch -> bufferedW (List.ofSeq batch)
 
-    let timer = new System.Windows.Forms.Timer() 
+    let timer = new System.Windows.Forms.Timer()
     timer.Interval <- timeMS
     timer.Tick.Add(fun _ -> timer.Stop(); processBatch(); timer.Start())
     timer.Start()
@@ -129,22 +150,22 @@ let bufferEvent timeMS (w : #IObservable<_>) =
 
 // Sessions...
 
-let catchAll trigger x = 
-    try trigger x  
+let catchAll trigger x =
+    try trigger x
     with err -> System.Windows.Forms.MessageBox.Show(err.ToString()) |> ignore
 
-let determineFsiPath () =
-    if SessionsProperties.fsiUseNetCore then
+let determineFsiPath (options: InteractiveOptions) =
+    if options.UseNetCore then
         let pf = Environment.GetEnvironmentVariable("ProgramW6432")
         let pf = if String.IsNullOrEmpty(pf) then Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles) else pf
-        let exe = Path.Combine(pf,"dotnet","dotnet.exe") 
+        let exe = Path.Combine(pf,"dotnet","dotnet.exe")
         let arg = "fsi"
         if not (File.Exists exe) then
             raise (SessionError (VFSIstrings.SR.couldNotFindFsiExe exe))
         exe, arg, false
     else
-        let fsiExeName () = 
-            if SessionsProperties.useAnyCpuVersion then
+        let fsiExeName () =
+            if options.PreferAnyCpuVersion then
                 "fsiAnyCpu.exe"
             elif RuntimeInformation.ProcessArchitecture = Architecture.Arm64 then
                 "fsiArm64.exe"
@@ -160,7 +181,7 @@ let determineFsiPath () =
         let determineFsiRelativePath2 () =
             let thisAssembly : System.Reflection.Assembly = typeof<CtrlBreakClient>.Assembly
             let thisAssemblyDirectory = thisAssembly.Location |> Path.GetDirectoryName
-            // Use the quick-development path if available    
+            // Use the quick-development path if available
             Path.Combine(thisAssemblyDirectory, "Tools", fsiExeName() )
 
         let fsiExe =
@@ -168,7 +189,7 @@ let determineFsiPath () =
             let fsiRelativePath1 = determineFsiRelativePath1()
             if  File.Exists fsiRelativePath1 then fsiRelativePath1 else
 
-            // Choose relative path, if it exists (for developers), otherwise, the installed path.    
+            // Choose relative path, if it exists (for developers), otherwise, the installed path.
             let fsiRelativePath2 = determineFsiRelativePath2()
             if  File.Exists fsiRelativePath2 then fsiRelativePath2 else
 
@@ -221,10 +242,10 @@ let readOutputAsync (reader: StreamReader) trigger =
                 trigger text
                 findLinesInBuffer 0
 
-    let rec read pos = 
+    let rec read pos =
         async {
-            let! bytesRead = 
-                try 
+            let! bytesRead =
+                try
                     reader.BaseStream.AsyncRead(byteBuffer, 0, byteBuffer.Length)
                 with
                     | :? IOException -> async0
@@ -236,9 +257,8 @@ let readOutputAsync (reader: StreamReader) trigger =
         }
     Async.StartImmediate (read 0)
 
-let fsiStartInfo channelName sourceFile =
+let fsiStartInfo (options: InteractiveOptions) (fsiPath, fsiFirstArgs, fsiSupportsShadowcopy) channelName sourceFile =
     let procInfo = new ProcessStartInfo()
-    let fsiPath, fsiFirstArgs, fsiSupportsShadowcopy  = determineFsiPath () 
 
     procInfo.FileName  <- fsiPath
 
@@ -257,13 +277,13 @@ let fsiStartInfo channelName sourceFile =
         |> addStringOption true "fsi-server-input-codepage" inCP
         |> addStringOption true "fsi-server-lcid" Thread.CurrentThread.CurrentUICulture.LCID
         |> addStringOption true "fsi-server" channelName
-        |> (fun s -> s +  sprintf " %s" SessionsProperties.fsiArgs)
-        |> addBoolOption fsiSupportsShadowcopy "shadowcopyreferences" SessionsProperties.fsiShadowCopy
+        |> (fun s -> s +  sprintf " %s" options.CommandLineArgs)
+        |> addBoolOption fsiSupportsShadowcopy "shadowcopyreferences" options.ShadowCopy
         // For best debug experience, need optimizations OFF and debug info ON
         // tack these on the end, they will override whatever comes earlier
-        |> addBoolOption SessionsProperties.fsiDebugMode "optimize" false
-        |> addBoolOption SessionsProperties.fsiDebugMode "debug" true
-        |> addStringOption SessionsProperties.fsiPreview "langversion" "preview"
+        |> addBoolOption options.DebugMode "optimize" false
+        |> addBoolOption options.DebugMode "debug" true
+        |> addStringOption options.Preview "langversion" "preview"
 
     procInfo.Arguments <- procArgs
     procInfo.CreateNoWindow <- true
@@ -273,9 +293,9 @@ let fsiStartInfo channelName sourceFile =
     procInfo.RedirectStandardOutput <- true
     procInfo.StandardOutputEncoding <- Encoding.UTF8
     procInfo.StandardErrorEncoding <- Encoding.UTF8
-    
-    let initialPath = 
-        match sourceFile with 
+
+    let initialPath =
+        match sourceFile with
         | path when path <> null && Directory.Exists(Path.GetDirectoryName(path)) -> Path.GetDirectoryName(path)
         | _ -> Path.GetTempPath()
 
@@ -288,7 +308,7 @@ let fsiStartInfo channelName sourceFile =
 let nonNull = function null -> false | (_:string) -> true
 
 /// Represents an active F# Interactive process to which Visual Studio is connected via stdin/stdout/stderr and a remoting channel
-type FsiSession(sourceFile) = 
+type FsiSession(sourceFile) =
     let randomSalt = System.Random()
     let channelName =
         let pid  = Process.GetCurrentProcess().Id
@@ -296,9 +316,10 @@ type FsiSession(sourceFile) =
         let salt = randomSalt.Next()
         sprintf "FSIChannel_%d_%d_%d" pid tick salt
 
-    let procInfo = fsiStartInfo channelName sourceFile
+    let options = SessionsProperties.Current
+    let procInfo = fsiStartInfo options (determineFsiPath options) channelName sourceFile
 
-    let usingNetCore = SessionsProperties.fsiUseNetCore
+    let usingNetCore = options.UseNetCore
 
     let cmdProcess = new Process(StartInfo=procInfo)
     let fsiOutput = Event<_>()
@@ -316,10 +337,10 @@ type FsiSession(sourceFile) =
     do readOutputAsync cmdProcess.StandardOutput (fun line ->
            // For .NET Core, the "dotnet fsi ..." starts a second process "dotnet ..../fsi.dll ..."
            // So the first thing we ask a .NET Core F# Interactive to do is report its true process ID.
-           // 
+           //
            // After it executes the request it will print:
            //    LINE1 -->  val it: unit = ()
-           //    LINE2 -->  
+           //    LINE2 -->
            //    LINE3 -->  SERVER-PROMPT>
            //
            // We skip these lines.
@@ -333,16 +354,16 @@ type FsiSession(sourceFile) =
 
     do readOutputAsync cmdProcess.StandardError  (catchAll fsiError.Trigger)
 
-    let inputQueue = 
+    let inputQueue =
         // Write the input asynchronously, freeing up the IDE thread to continue doing work
         // Force input to be written in UTF8 regardless of the apparent encoding.
         let inputWriter = new StreamWriter(cmdProcess.StandardInput.BaseStream, new UTF8Encoding(encoderShouldEmitUTF8Identifier=false), AutoFlush = false)
-        MailboxProcessor<string>.Start(fun inbox -> 
-            async { 
-                try 
-                  while not cmdProcess.HasExited do 
-                    let! textToWrite = inbox.Receive() 
-                    inputWriter.WriteLine(textToWrite) 
+        MailboxProcessor<string>.Start(fun inbox ->
+            async {
+                try
+                  while not cmdProcess.HasExited do
+                    let! textToWrite = inbox.Receive()
+                    inputWriter.WriteLine(textToWrite)
                     inputWriter.Flush()
                 with _ -> () // if writing or flushing fails then just give up on this F# Interactive session
             })
@@ -386,7 +407,7 @@ type FsiSession(sourceFile) =
             // of inner process to complete on startup.  The only scenario where we ask for the process ID immediately after
             // process startup is when the user clicks "Start Debugging" before the process has started.
             for i in 0..10 do
-                if SessionsProperties.fsiUseNetCore && trueProcessPid.IsNone then
+                if usingNetCore && trueProcessPid.IsNone then
                     if File.Exists(trueProcessIdFile) then
                         let lines = File.ReadAllLines trueProcessIdFile
                         trueProcessPid <-
@@ -405,8 +426,8 @@ type FsiSession(sourceFile) =
                         System.Threading.Thread.Sleep(200)
             trueProcessPid, trueFrameworkVersion
 
-    // Create session object 
-    member _.Interrupt() = 
+    // Create session object
+    member _.Interrupt() =
         match timeoutApp "VFSI interrupt" interruptTimeoutMS (fun () -> client.Interrupt()) () with
         | Some () -> true
         | None    -> false
@@ -424,7 +445,7 @@ type FsiSession(sourceFile) =
     member _.SupportsInterrupt = not cmdProcess.HasExited
 
     member _.ProcessID =
-        match splitPidFile.Force() with 
+        match splitPidFile.Force() with
         | None, _ -> cmdProcessPid
         | Some pid, _ -> pid
 
@@ -436,11 +457,11 @@ type FsiSession(sourceFile) =
 
     member _.Kill() =
         let verboseSession = false
-        try 
+        try
             if verboseSession then fsiOutput.Trigger ("Kill process " + cmdProcess.Id.ToString())
             cmdProcess.Kill()
             if verboseSession then cmdProcess.Exited.Add(fun _ -> fsiOutput.Trigger (cmdProcess.Id.ToString()))
-        with e -> 
+        with e ->
             fsiOutput.Trigger (VFSIstrings.SR.killingProcessRaisedException (e.ToString()))
 
 //-------------------------------------------------------------------------
@@ -448,56 +469,56 @@ type FsiSession(sourceFile) =
 //-------------------------------------------------------------------------
 
 /// Represents a container for all the active F# Interactive sessions
-/// Currently there is either 0 or 1 
+/// Currently there is either 0 or 1
 type FsiSessions() =
     // state: the most recent (if any) session object
-    let mutable sessionR : FsiSession option  = None 
+    let mutable sessionR : FsiSession option  = None
 
-    let isCurrentSession session = 
+    let isCurrentSession session =
         (sessionR = Some session)
-    
+
     let fsiOut = Event<string>()
     let fsiError = Event<string>()
     let fsiExited = Event<EventArgs>()
-  
+
     let kill() =
-      sessionR |> Option.iter (fun session -> 
+      sessionR |> Option.iter (fun session ->
           sessionR <- None
           // clearing sessionR before kill() means session.Exited is ignored below
           session.Kill())
-     
+
     let restart(sourceFile) =
         kill()
-        try 
+        try
             let session = FsiSession(sourceFile)
-            sessionR <- Some session          
+            sessionR <- Some session
             // All response callbacks are guarded by checks that "session" is still THE ACTIVE session.
             session.Output.Add(fun s -> if isCurrentSession session then fsiOut.Trigger s)
             session.Error.Add(fun s -> if isCurrentSession session then fsiError.Trigger s)
             session.Exited.Add(fun x -> if isCurrentSession session then (sessionR <- None; fsiExited.Trigger x))
         with
             SessionError text -> fsiError.Trigger text
-   
+
     let ensure(sourceFile) =
         if sessionR.IsNone then restart(sourceFile)
 
-    member _.Interrupt() = 
+    member _.Interrupt() =
         sessionR |> Option.forall (fun session -> session.Interrupt())
 
-    member _.SendInput s = 
+    member _.SendInput s =
         sessionR |> Option.iter (fun session -> session.SendInput s)
 
     member _.Output = fsiOut.Publish
 
     member _.Error = fsiError.Publish
 
-    member _.Alive = 
+    member _.Alive =
         sessionR |> Option.exists (fun session -> session.Alive)
 
-    member _.SupportsInterrupt = 
+    member _.SupportsInterrupt =
         sessionR |> Option.exists (fun session -> session.SupportsInterrupt)
 
-    member _.ProcessID = 
+    member _.ProcessID =
         match sessionR with
         | None -> -1 (* -1 assumed to never be a valid process ID *)
         | Some session -> session.ProcessID
@@ -507,15 +528,15 @@ type FsiSessions() =
         | None -> false
         | Some session -> session.SupportsInteractivePrompt
 
-    member _.ProcessArgs    = 
+    member _.ProcessArgs    =
         match sessionR with
         | None -> ""
         | Some session -> session.ProcessArgs
 
     member _.Kill()         = kill()
-    
+
     member _.Ensure(sourceFile) = ensure(sourceFile)
 
     member _.Restart(sourceFile) = restart(sourceFile)
-    
+
     member _.Exited         = fsiExited.Publish

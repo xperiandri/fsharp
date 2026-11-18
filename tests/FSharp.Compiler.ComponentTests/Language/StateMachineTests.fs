@@ -8,6 +8,127 @@ open FSharp.Test.Compiler
 
 module StateMachineTests =
 
+    [<FSharp.Test.TheoryForNETCOREAPP; InlineData(false); InlineData(true)>]
+    let ``SRTP await helpers preserve generic state machine captures`` optimize =
+        FSharp """
+open System.Runtime.CompilerServices
+open System.Threading.Tasks
+open Microsoft.FSharp.Control
+open Microsoft.FSharp.Core.CompilerServices
+
+#nowarn "3513"
+#nowarn "1204"
+
+type Helper =
+    static member inline Await(builder: byref< ^Builder>, awaiter: byref< ^Awaiter>, sm: byref< ^StateMachine>) =
+        (^Builder: (member AwaitUnsafeOnCompleted: byref< ^Awaiter> * byref< ^StateMachine> -> unit)
+            (builder, &awaiter, &sm))
+
+[<NoComparison; NoEquality>]
+type CustomAwaitable = CustomAwaitable of YieldAwaitable
+
+type TaskBuilderBase with
+    member inline _.Bind(CustomAwaitable value, continuation: unit -> TaskCode<'T, 'U>) =
+        TaskCode<'T, 'U>(fun sm ->
+            if __useResumableCode then
+                let mutable awaiter = value.GetAwaiter()
+                let mutable __stack_fin = true
+                if not awaiter.IsCompleted then
+                    let __stack_yield_fin = ResumableCode.Yield().Invoke(&sm)
+                    __stack_fin <- __stack_yield_fin
+                if __stack_fin then
+                    awaiter.GetResult()
+                    (continuation ()).Invoke(&sm)
+                else
+                    Helper.Await(&sm.Data.MethodBuilder, &awaiter, &sm)
+                    false
+            else
+                failwith "unexpected dynamic fallback")
+
+let fakeWork value (items: ResizeArray<_>) =
+    task {
+        items.Add value
+        do! CustomAwaitable(Task.Yield())
+        items.Add value
+    }
+
+[<EntryPoint>]
+let main _ =
+    let items = ResizeArray<int>()
+    fakeWork 1 items |> fun work -> work.GetAwaiter().GetResult()
+    if Seq.toList items <> [1; 1] then failwithf "Unexpected captures: %A" items
+    0
+"""
+        |> withDebug
+        |> withOptimization optimize
+        |> withFSharpCoreShippedNet
+        |> compileExeAndRun
+        |> shouldSucceed
+
+    [<Theory>]
+    [<InlineData(false, false)>]
+    [<InlineData(false, true)>]
+    [<InlineData(true, false)>]
+    [<InlineData(true, true)>]
+    let ``Resumable builders and combinators inline across assemblies`` (optimizeLibrary, optimizeConsumer) =
+        let library =
+            FSharp """
+module ResumableLibrary
+
+open System.Runtime.CompilerServices
+open Microsoft.FSharp.Core.CompilerServices
+open Microsoft.FSharp.Core.CompilerServices.StateMachineHelpers
+
+#nowarn "3513"
+
+let inline finish (sm: byref<'SM> when 'SM :> IAsyncStateMachine and 'SM :> IResumableStateMachine<int>) =
+    sm.MoveNext()
+    sm.Data
+
+let inline step () =
+    ResumableCode<int, unit>(fun sm ->
+        if __useResumableCode then
+            sm.Data <- sm.Data + 21
+            true
+        else
+            failwith "unexpected combinator fallback")
+
+type Builder() =
+    member inline _.Run(code: ResumableCode<int, unit>) =
+        if __useResumableCode then
+            __stateMachine<int, int>
+                (MoveNextMethodImpl<_>(fun sm ->
+                    code.Invoke(&sm) |> ignore))
+                (SetStateMachineMethodImpl<_>(fun _ _ -> ()))
+                (AfterCode<_, _>(fun sm -> finish &sm))
+        else
+            failwith "unexpected dynamic fallback"
+
+let builder = Builder()
+
+let inline run () =
+    if __useResumableCode then
+        builder.Run(ResumableCode.Combine(step(), step()))
+    else
+        failwith "unexpected wrapper fallback"
+"""
+            |> withName "ResumableLibrary"
+            |> withDebug
+            |> withOptimization optimizeLibrary
+            |> asLibrary
+
+        FSharp """
+[<EntryPoint>]
+let main _ =
+    if ResumableLibrary.run() = 42 then 0 else 1
+"""
+        |> withReferences [library]
+        |> withDebug
+        |> withOptimization optimizeConsumer
+        |> compileExeAndRun
+        |> shouldSucceed
+        |> withExitCode 0
+
     let verifyOptimizedAndRun code =
         Fsx code
         |> withOptimize
@@ -53,7 +174,7 @@ if FailingInlinedHelper.repro 42 <> 42 then failwith "unexpected result"
         |> shouldSucceed
 
     [<Fact>] // https://github.com/dotnet/fsharp/issues/13067
-    let ``Local function with a flexible type``() = 
+    let ``Local function with a flexible type``() =
         """
 task {
     let m1 f s = Seq.map f s
@@ -72,7 +193,7 @@ task {
         |> shouldSucceed
 
     [<Fact>] // https://github.com/dotnet/fsharp/issues/14806
-    let ``Explicit returns types + constraints on generics``() = 
+    let ``Explicit returns types + constraints on generics``() =
         """
 module Foo
 
@@ -94,10 +215,10 @@ run()
 """
         |> verifyOptimizedAndRun
         |> shouldSucceed
-        
+
 
     [<Fact>] // https://github.com/dotnet/fsharp/issues/14807
-    let ``let _ = null``() = 
+    let ``let _ = null``() =
         """
 module TestProject1
 
@@ -140,7 +261,7 @@ for i in 1 .. 100 do
         |> shouldSucceed
 
     [<Fact>] // https://github.com/dotnet/fsharp/issues/16068
-    let ``Decision tree with 32+ binds with nested expression is not getting splitted and state machine is successfully statically compiles``() = 
+    let ``Decision tree with 32+ binds with nested expression is not getting splitted and state machine is successfully statically compiles``() =
         FSharp """
 module Testing
 
@@ -491,4 +612,106 @@ let trigger() =
         |> withDebug
         |> withNoOptimize
         |> compile
+        |> shouldSucceed
+
+    [<Theory; InlineData(false); InlineData(true)>]
+    let ``ResumableStateMachine values of other instantiations are not replaced by the task state machine`` optimize =
+        FSharp """
+module ResumableStateMachineInstantiations
+
+#nowarn "57"
+
+open System.Threading.Tasks
+open Microsoft.FSharp.Core.CompilerServices
+
+type Holder<'T>() =
+    [<DefaultValue(false)>]
+    val mutable Machine: ResumableStateMachine<'T>
+
+type Data<'T>() =
+    [<DefaultValue(false)>]
+    val mutable items: ResizeArray<'T>
+
+type Runner<'T>() =
+    [<DefaultValue(false)>]
+    val mutable _machine: ResumableStateMachine<Data<'T>>
+
+    member this.Init(xs: 'T list) =
+        let d = Data<'T>()
+        d.items <- ResizeArray xs
+        this._machine.Data <- d
+
+    member this.CountAsync() =
+        task {
+            do! Task.Yield()
+            return this._machine.Data.items.Count
+        }
+
+let read (h: Holder<string>) =
+    task {
+        do! Task.Yield()
+        return h.Machine.Data
+    }
+
+let readInLoop (h: Holder<ResizeArray<string>>) =
+    task {
+        let results = ResizeArray()
+        for item in h.Machine.Data do
+            do! Task.Yield()
+            results.Add item
+        return List.ofSeq results
+    }
+
+let readWrite (h: Holder<int>) =
+    task {
+        h.Machine.Data <- 1
+        do! Task.Yield()
+        h.Machine.Data <- h.Machine.Data + 1
+        h.Machine.ResumptionPoint <- 7
+        return h.Machine.Data, h.Machine.ResumptionPoint
+    }
+
+let readWriteGeneric (h: Holder<'T>) (value: 'T) =
+    task {
+        do! Task.Yield()
+        h.Machine.Data <- value
+        return h.Machine.Data
+    }
+
+let localAcrossAwait () =
+    task {
+        let mutable local = ResumableStateMachine<int list>()
+        local.Data <- [ 1; 2 ]
+        do! Task.Yield()
+        return local.Data
+    }
+
+let check name expected actual =
+    if expected <> actual then failwith $"%s{name}: expected %A{expected}, got %A{actual}"
+
+let runner = Runner<int>()
+runner.Init [ 1; 2; 3 ]
+check "member read through this" 3 (runner.CountAsync()).Result
+
+let hl = Holder<ResizeArray<string>>()
+hl.Machine.Data <- ResizeArray [ "a"; "b" ]
+check "readInLoop" [ "a"; "b" ] (readInLoop hl).Result
+
+let hs = Holder<string>()
+hs.Machine.Data <- "hello"
+check "read" "hello" (read hs).Result
+
+let hi = Holder<int>()
+check "readWrite" (2, 7) (readWrite hi).Result
+check "readWrite field" 2 hi.Machine.Data
+
+let hg = Holder<int option>()
+check "readWriteGeneric" (Some 3) (readWriteGeneric hg (Some 3)).Result
+check "readWriteGeneric field" (Some 3) hg.Machine.Data
+
+check "localAcrossAwait" [ 1; 2 ] (localAcrossAwait ()).Result
+"""
+        |> withOptimization optimize
+        |> withOptions [ "--warnaserror+:3511" ]
+        |> compileExeAndRun
         |> shouldSucceed

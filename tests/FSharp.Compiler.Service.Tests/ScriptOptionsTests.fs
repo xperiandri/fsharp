@@ -1,13 +1,17 @@
-// Because of script closure cache.
-[<FSharp.Test.RunTestCasesInSequence>]
+// Avoid parallelism to leverage script closure cache.
+[<Xunit.TestClass(DisableParallelization = true)>]
 module FSharp.Compiler.Service.Tests.ScriptOptionsTests
 
-open Xunit
+open System
 open System.IO
-open FSharp.Compiler.Service.Tests.Common
+
 open FSharp.Compiler.CodeAnalysis
+open FSharp.Compiler.Service.Tests.Common
 open FSharp.Compiler.Text
+
 open TestFramework
+
+open Xunit
 
 // Add additional imports/constructs into this script text to verify that common scenarios
 // for FCS script typechecking can be supported
@@ -32,7 +36,8 @@ let ``can generate options for different frameworks regardless of execution envi
     let tempFile = Path.Combine(path, file)
     let _, errors =
         checker.GetProjectOptionsFromScript(tempFile, SourceText.ofString scriptSource, assumeDotNetFramework = assumeDotNetFramework, useSdkRefs = useSdkRefs, otherFlags = [| flag |])
-        |> Async.RunImmediate
+        |> Async.RunSynchronouslyImmediate
+
     match errors with
     | [] -> ()
     | errors -> failwithf "Error while parsing script with otherFlags:%A:\n%A" [| flag |] errors
@@ -53,13 +58,37 @@ let pi = Math.PI
 """
     let options, errors =
         checker.GetProjectOptionsFromScript(file, SourceText.ofString scriptSource, assumeDotNetFramework = false, useSdkRefs = true, otherFlags = [|flag|])
-        |> Async.RunImmediate
+        |> Async.RunSynchronouslyImmediate
+
     match errors with
     | [] -> ()
     | errors -> failwithf "Error while parsing script with assumeDotNetFramework:%b, useSdkRefs:%b, and otherFlags:%A:\n%A" false true [|flag|] errors
     let expectedReferenceText = match [| flag |] |> Array.tryFind(fun f -> f = "--targetprofile:mscorlib") with | Some _ -> "net45" | _ -> "netstandard2.0"
     let found = options.OtherOptions |> Array.exists (fun s -> s.Contains(expectedReferenceText) && s.Contains("FSharp.Data.dll"))
     Assert.True(found)
+
+// https://github.com/dotnet/fsharp/issues/12708
+[<Fact>]
+let ``Issue 12708 - editor-side NuGet resolution does not alter host PATH`` () =
+    let originalPath = Environment.GetEnvironmentVariable("PATH")
+
+    try
+        let file = Path.Combine(Path.GetTempPath(), getTemporaryFileName () + ".fsx")
+        let localChecker = FSharpChecker.Create()
+
+        let _, errors =
+            localChecker.GetProjectOptionsFromScript(
+                file,
+                SourceText.ofString """#r "nuget: System.Json, 4.6.0" """,
+                assumeDotNetFramework = false,
+                useSdkRefs = true
+            )
+            |> Async.RunSynchronouslyImmediate
+
+        Assert.Empty errors
+        Assert.Equal(originalPath, Environment.GetEnvironmentVariable("PATH"))
+    finally
+        Environment.SetEnvironmentVariable("PATH", originalPath)
 
 /// `SourceFiles` is exactly the single script; the fsi default-reference injection for a missing `#load`
 /// is a host-layout detail (not product behaviour) and is intentionally not asserted.
@@ -77,7 +106,7 @@ let ``Fsx.ScriptClosure.SurfaceOrderOfHashes`` () =
     let tempFile = Path.Combine(Path.GetTempPath(), getTemporaryFileName () + ".fsx")
     let options, _errors =
         checker.GetProjectOptionsFromScript(tempFile, SourceText.ofString scriptSource)
-        |> Async.RunImmediate
+        |> Async.RunSynchronouslyImmediate
     let containsPartial (needle: string) = options.OtherOptions |> Array.exists (fun o -> o.Contains needle)
     Assert.True(containsPartial "--noframework", "OtherOptions should contain --noframework")
     Assert.True(containsPartial "System.Runtime.Remoting.dll", "OtherOptions should resolve System.Runtime.Remoting.dll")
@@ -106,7 +135,7 @@ let ``Fsx.InvalidMetaCommandFilenames`` () =
     let tempFile = Path.Combine(Path.GetTempPath(), getTemporaryFileName () + ".fsx")
     let options, _errors =
         checker.GetProjectOptionsFromScript(tempFile, SourceText.ofString scriptSource)
-        |> Async.RunImmediate
+        |> Async.RunSynchronouslyImmediate
     Assert.Equal(1, options.SourceFiles.Length)
     Assert.Equal(tempFile, options.SourceFiles.[0])
     Assert.Contains("--noframework", options.OtherOptions)

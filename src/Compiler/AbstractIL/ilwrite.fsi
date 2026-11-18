@@ -26,12 +26,19 @@ type options =
         dumpDebugInfo: bool
         referenceAssemblyOnly: bool
         referenceAssemblyAttribOpt: ILAttribute option
-        referenceAssemblySignatureHash: int option
+        referenceAssemblySignatureHash: int64 option
         pathMap: PathMap
+        /// Hot reload baseline side channel: module-level CustomDebugInformation rows for
+        /// F#-owned records in the portable PDB. Empty for ordinary compiles.
+        moduleCustomDebugInfoRows: PdbModuleCustomDebugInfo list
         /// Per-method EnC CustomDebugInformation rows for the portable PDB writer, keyed by
         /// IL method name. Empty for ordinary compiles, so flag-off output stays byte-identical.
         methodCustomDebugInfoRows: Map<string, PdbMethodCustomDebugInfo list>
     }
+
+/// Computes the trailing byte for a user string blob per ECMA-335 II.24.2.4.
+/// Returns 1 if any character needs special handling, 0 otherwise.
+val markerForUnicodeBytes: b: byte[] -> int
 
 /// Write a binary to the file system.
 val WriteILBinaryFile: options: options * inputModule: ILModuleDef * (ILAssemblyRef -> ILAssemblyRef) -> unit
